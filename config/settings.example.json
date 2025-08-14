@@ -37,7 +37,7 @@
     },
     "scheduler": {
         "announce_time": "09:00",
-        "enabled": false,
+        "enabled": true,
         "search_hours_back": 24,
         "auto_log_to_sheets": true,
         "require_staff_confirmation": true

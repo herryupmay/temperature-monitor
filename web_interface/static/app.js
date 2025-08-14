@@ -312,8 +312,6 @@ function testEmailFilters() {
     });
 }
 
-// Add these functions to your existing static/app.js file
-
 // Scheduler Management Functions
 async function loadSchedulerStatus() {
     try {
@@ -357,8 +355,6 @@ function updateSchedulerDisplay(status) {
     `;
 }
 
-
-
 async function startScheduler() {
     try {
         const response = await fetch('/api/scheduler/start', {
@@ -368,13 +364,13 @@ async function startScheduler() {
         const result = await response.json();
         
         if (result.success) {
-            showSuccess('Scheduler started: ' + result.message);
+            showAlert('Scheduler started: ' + result.message);
             loadSchedulerStatus(); // Refresh status
         } else {
-            showError('Failed to start scheduler: ' + result.error);
+            showAlert('Failed to start scheduler: ' + (result.error || result.message || 'Unknown error'), 'error');
         }
     } catch (error) {
-        showError('Error starting scheduler: ' + error.message);
+        showAlert('Error starting scheduler: ' + error.message, 'error');
     }
 }
 
@@ -387,13 +383,13 @@ async function stopScheduler() {
         const result = await response.json();
         
         if (result.success) {
-            showSuccess('Scheduler stopped: ' + result.message);
+            showAlert('Scheduler stopped: ' + result.message);
             loadSchedulerStatus(); // Refresh status
         } else {
-            showError('Failed to stop scheduler: ' + result.error);
+            showAlert('Failed to stop scheduler: ' + (result.error || result.message || 'Unknown error'), 'error');
         }
     } catch (error) {
-        showError('Error stopping scheduler: ' + error.message);
+        showAlert('Error stopping scheduler: ' + error.message, 'error');
     }
 }
 
@@ -413,7 +409,7 @@ async function testAnnouncement() {
         
         if (result.success) {
             const announcement = result.announcement;
-            showSuccess(`Test Announcement Complete: ${announcement.message}`);
+            showAlert(`Test Announcement Complete: ${announcement.message}`);
             
             // Display detailed results
             const resultsDiv = document.getElementById('test-results');
@@ -428,57 +424,19 @@ async function testAnnouncement() {
                     <div class="test-result-item"><strong>Sheets Logged:</strong> ${summary.sheets_logged ? 'Yes' : 'No'}</div>
                     ${summary.latest_reading ? `<div class="test-result-item"><strong>Latest:</strong> ${summary.latest_reading.value}°C at ${summary.latest_reading.location}</div>` : ''}
                 `;
+                resultsDiv.style.display = 'block';
             }
         } else {
-            showError('Test failed: ' + result.error);
+            showAlert('Test failed: ' + (result.error || 'Unknown error'), 'error');
         }
     } catch (error) {
-        showError('Error running test: ' + error.message);
+        showAlert('Error running test: ' + error.message, 'error');
     } finally {
         const button = document.getElementById('test-announcement-btn');
         if (button) {
             button.disabled = false;
-            button.innerHTML = 'Test Announcement';
+            button.innerHTML = '🧪 Test Manual Announcement';
         }
-    }
-}
-
-async function addStaffConfirmation() {
-    try {
-        const staffName = document.getElementById('staff-name').value.trim();
-        const location = document.getElementById('confirmation-location').value;
-        
-        if (!staffName) {
-            showError('Please enter a staff name');
-            return;
-        }
-        
-        if (!location) {
-            showError('Please select a location');
-            return;
-        }
-        
-        const response = await fetch('/api/sheets/confirm', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                staff_name: staffName,
-                location: location
-            })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showSuccess('Staff confirmation added: ' + result.message);
-            document.getElementById('staff-name').value = ''; // Clear input
-        } else {
-            showError('Failed to add confirmation: ' + result.error);
-        }
-    } catch (error) {
-        showError('Error adding staff confirmation: ' + error.message);
     }
 }
 
@@ -490,10 +448,10 @@ async function openGoogleSheets() {
         if (result.success && result.url) {
             window.open(result.url, '_blank');
         } else {
-            showError(result.message || 'No Google Sheets URL available');
+            showAlert(result.message || 'No Google Sheets URL available', 'error');
         }
     } catch (error) {
-        showError('Error getting sheets URL: ' + error.message);
+        showAlert('Error getting sheets URL: ' + error.message, 'error');
     }
 }
 
@@ -505,11 +463,22 @@ async function loadSchedulerSettings() {
         
         if (result.success) {
             const settings = result.settings;
-            document.getElementById('announce-time').value = settings.announce_time || '09:00';
-            document.getElementById('scheduler-enabled').checked = settings.enabled || false;
-            document.getElementById('search-hours').value = settings.search_hours_back || 24;
-            document.getElementById('auto-log-sheets').checked = settings.auto_log_to_sheets !== false;
-            document.getElementById('require-confirmation').checked = settings.require_staff_confirmation !== false;
+            
+            // Safe element access with null checks
+            const announceTimeEl = document.getElementById('announce-time');
+            if (announceTimeEl) announceTimeEl.value = settings.announce_time || '09:00';
+            
+            const schedulerEnabledEl = document.getElementById('scheduler-enabled');
+            if (schedulerEnabledEl) schedulerEnabledEl.checked = settings.enabled || false;
+            
+            const searchHoursEl = document.getElementById('search-hours');
+            if (searchHoursEl) searchHoursEl.value = settings.search_hours_back || 24;
+            
+            const autoLogSheetsEl = document.getElementById('auto-log-sheets');
+            if (autoLogSheetsEl) autoLogSheetsEl.checked = settings.auto_log_to_sheets !== false;
+            
+            const requireConfirmationEl = document.getElementById('require-staff-confirmation');
+            if (requireConfirmationEl) requireConfirmationEl.checked = settings.require_staff_confirmation !== false;
         }
     } catch (error) {
         console.error('Error loading scheduler settings:', error);
@@ -526,17 +495,54 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(loadSchedulerStatus, 30000);
 });
 
-// Helper functions for displaying messages
-function showSuccess(message) {
-    console.log('SUCCESS:', message);
-    // You can enhance this with a proper notification system
-    alert('✅ ' + message);
+// Updated saveSchedulerSettings function
+async function saveSchedulerSettings() {
+    try {
+        const announceTimeEl = document.getElementById('announce-time');
+        const schedulerEnabledEl = document.getElementById('scheduler-enabled');
+        const searchHoursEl = document.getElementById('search-hours');
+        const autoLogSheetsEl = document.getElementById('auto-log-sheets');
+        const requireConfirmationEl = document.getElementById('require-staff-confirmation');
+        
+        const settings = {
+            announce_time: announceTimeEl ? announceTimeEl.value : '09:00',
+            enabled: schedulerEnabledEl ? schedulerEnabledEl.checked : false,
+            search_hours_back: searchHoursEl ? parseInt(searchHoursEl.value) || 24 : 24,
+            auto_log_to_sheets: autoLogSheetsEl ? autoLogSheetsEl.checked : true,
+            require_staff_confirmation: requireConfirmationEl ? requireConfirmationEl.checked : true
+        };
+        
+        // Validate time format
+        if (settings.announce_time && !/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(settings.announce_time)) {
+            showAlert('Please enter a valid time in HH:MM format (24-hour)', 'error');
+            return;
+        }
+        
+        const response = await fetch('/api/scheduler/settings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(settings)
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showAlert('Scheduler settings saved: ' + result.message);
+            loadSchedulerStatus(); // Refresh status
+        } else {
+            showAlert('Failed to save settings: ' + (result.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        showAlert('Error saving scheduler settings: ' + error.message, 'error');
+    }
 }
 
+// Helper functions for displaying messages
 function showError(message) {
     console.error('ERROR:', message);
-    // You can enhance this with a proper notification system
-    alert('❌ ' + message);
+    showAlert(message, 'error');
 }
 
 // Initialize the interface
@@ -554,204 +560,4 @@ document.addEventListener('DOMContentLoaded', function() {
             console.log('Could not load config, using default');
             selectedTempType = 'fridge';
         });
-});
-
-// Updated Staff Confirmation Functions for app.js
-
-// Show staff confirmation popup
-function showStaffConfirmationPopup() {
-    // Get available locations first
-    loadAvailableLocations();
-    
-    // Show the modal
-    document.getElementById('staff-confirmation-modal').style.display = 'block';
-    
-    // Focus on the name input
-    document.getElementById('modal-staff-name').focus();
-}
-
-// Close staff confirmation popup
-function closeStaffConfirmationPopup() {
-    document.getElementById('staff-confirmation-modal').style.display = 'none';
-    
-    // Clear the form
-    document.getElementById('modal-staff-name').value = '';
-    document.getElementById('confirmation-result').style.display = 'none';
-}
-
-// Load available locations from recent sheets data
-async function loadAvailableLocations() {
-    try {
-        // Try to get locations from recent scheduler status or sheets
-        const response = await fetch('/api/scheduler/status');
-        const result = await response.json();
-        
-        let locations = ['Dispensary', 'Fridge']; // Default locations
-        
-        // Could also try to get from recent test results or sheets
-        // For now, use common locations
-        
-        const locationNamesDiv = document.getElementById('location-names');
-        locationNamesDiv.innerHTML = locations.map(loc => `• ${loc}`).join('<br>');
-        
-    } catch (error) {
-        console.error('Error loading locations:', error);
-        document.getElementById('location-names').innerHTML = '• Dispensary<br>• Fridge';
-    }
-}
-
-// Confirm for all locations at once
-async function confirmAllLocations() {
-    try {
-        const staffName = document.getElementById('modal-staff-name').value.trim();
-        
-        if (!staffName) {
-            showConfirmationResult('Please enter your name', 'error');
-            return;
-        }
-        
-        // Get list of locations to confirm
-        const locations = ['Dispensary', 'Fridge']; // Could make this dynamic
-        
-        showConfirmationResult('Adding confirmations...', 'info');
-        
-        let successCount = 0;
-        let errors = [];
-        
-        // Confirm for each location
-        for (const location of locations) {
-            try {
-                const response = await fetch('/api/sheets/confirm', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        staff_name: staffName,
-                        location: location
-                    })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    successCount++;
-                } else {
-                    errors.push(`${location}: ${result.error}`);
-                }
-            } catch (error) {
-                errors.push(`${location}: Network error`);
-            }
-        }
-        
-        // Show results
-        if (successCount === locations.length) {
-            showConfirmationResult(`✅ Successfully confirmed for all ${successCount} locations!`, 'success');
-            
-            // Auto-close after 2 seconds
-            setTimeout(() => {
-                closeStaffConfirmationPopup();
-                showAlert(`Staff confirmation complete: ${staffName} confirmed for all locations`);
-            }, 2000);
-            
-        } else if (successCount > 0) {
-            showConfirmationResult(`⚠️ Partially successful: ${successCount}/${locations.length} locations confirmed`, 'warning');
-            if (errors.length > 0) {
-                showConfirmationResult(errors.join('<br>'), 'error');
-            }
-        } else {
-            showConfirmationResult(`❌ Failed to confirm any locations:<br>${errors.join('<br>')}`, 'error');
-        }
-        
-    } catch (error) {
-        showConfirmationResult(`❌ Error: ${error.message}`, 'error');
-    }
-}
-
-// Show result in the confirmation popup
-function showConfirmationResult(message, type) {
-    const resultDiv = document.getElementById('confirmation-result');
-    
-    let bgColor = '#f8f9fa';
-    let textColor = '#333';
-    
-    switch (type) {
-        case 'success':
-            bgColor = '#d4edda';
-            textColor = '#155724';
-            break;
-        case 'error':
-            bgColor = '#f8d7da';
-            textColor = '#721c24';
-            break;
-        case 'warning':
-            bgColor = '#fff3cd';
-            textColor = '#856404';
-            break;
-        case 'info':
-            bgColor = '#d1ecf1';
-            textColor = '#0c5460';
-            break;
-    }
-    
-    resultDiv.style.backgroundColor = bgColor;
-    resultDiv.style.color = textColor;
-    resultDiv.innerHTML = message;
-    resultDiv.style.display = 'block';
-}
-
-// Updated saveSchedulerSettings function to include staff confirmation setting
-async function saveSchedulerSettings() {
-    try {
-        const settings = {
-            announce_time: document.getElementById('announce-time').value,
-            enabled: document.getElementById('scheduler-enabled').checked,
-            search_hours_back: parseInt(document.getElementById('search-hours').value) || 24,
-            auto_log_to_sheets: document.getElementById('auto-log-sheets').checked,
-            require_staff_confirmation: document.getElementById('require-staff-confirmation').checked
-        };
-        
-        // Validate time format
-        if (settings.announce_time && !/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(settings.announce_time)) {
-            showError('Please enter a valid time in HH:MM format (24-hour)');
-            return;
-        }
-        
-        const response = await fetch('/api/scheduler/settings', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(settings)
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showSuccess('Scheduler settings saved: ' + result.message);
-            loadSchedulerStatus(); // Refresh status
-        } else {
-            showError('Failed to save settings: ' + result.error);
-        }
-    } catch (error) {
-        showError('Error saving scheduler settings: ' + error.message);
-    }
-}
-
-// Close modal when clicking outside of it
-document.addEventListener('click', function(event) {
-    const modal = document.getElementById('staff-confirmation-modal');
-    if (event.target === modal) {
-        closeStaffConfirmationPopup();
-    }
-});
-
-// Close modal with Escape key
-document.addEventListener('keydown', function(event) {
-    if (event.key === 'Escape') {
-        const modal = document.getElementById('staff-confirmation-modal');
-        if (modal.style.display === 'block') {
-            closeStaffConfirmationPopup();
-        }
-    }
 });

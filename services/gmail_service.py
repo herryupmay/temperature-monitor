@@ -619,7 +619,7 @@ class GmailTemperatureService:
             logger.error(f"Error saving discovered locations: {e}")
     
     def get_temperature_summary(self, hours_back=24, auto_log_to_sheets=True, custom_logged_time=None):
-        """Get a summary of recent temperature data with optional sheets logging"""
+        """Get a summary of recent temperature data with optional sheets logging - USES ONLY MOST RECENT EMAIL"""
         try:
             emails, message = self.search_temperature_emails(hours_back)
             
@@ -635,12 +635,24 @@ class GmailTemperatureService:
                     'message': message
                 }
             
-            # Aggregate data
+            # Use only the most recent email
+            logger.info(f"Found {len(emails)} temperature emails, using only the most recent")
+            
+            # Sort emails by date (newest first) and take only the first one
+            sorted_emails = sorted(emails, key=lambda x: x['date'], reverse=True)
+            most_recent_email = sorted_emails[0]
+            
+            logger.info(f"Using most recent email: {most_recent_email['subject']} from {most_recent_email['date']}")
+            
+            # Process only the most recent email
+            emails_to_process = [most_recent_email]
+            
+            # Aggregate data from the single most recent email
             all_temperatures = []
             all_alerts = []
             locations = set()
             
-            for email in emails:
+            for email in emails_to_process:  # Will only be 1 email now
                 temp_data = email['temperature_data']
                 all_temperatures.extend(temp_data['temperatures'])
                 all_alerts.extend(temp_data['alerts'])
@@ -648,7 +660,7 @@ class GmailTemperatureService:
                 for temp in temp_data['temperatures']:
                     locations.add(temp['location'])
             
-            # Get latest reading
+            # Get latest reading (from the single email)
             latest_reading = None
             if all_temperatures:
                 latest_reading = max(all_temperatures, key=lambda x: x['timestamp'])
@@ -664,7 +676,13 @@ class GmailTemperatureService:
                 )
             
             summary = {
-                'total_emails': len(emails),
+                'total_emails': len(emails),  # Total found
+                'emails_processed': len(emails_to_process),  # Actually processed (1)
+                'most_recent_email': {
+                    'subject': most_recent_email['subject'],
+                    'date': most_recent_email['date'].isoformat(),
+                    'sender': most_recent_email['sender']
+                },
                 'total_readings': len(all_temperatures),
                 'locations': list(locations),
                 'alerts': list(set(all_alerts)),
@@ -673,7 +691,7 @@ class GmailTemperatureService:
                 'discovered_locations': self.get_location_discovery_summary(),
                 'sheets_logged': sheets_logged,
                 'sheets_message': sheets_message,
-                'message': f"Found {len(emails)} temperature emails with {len(all_temperatures)} readings"
+                'message': f"Found {len(emails)} emails, processed most recent: {most_recent_email['subject']}"
             }
             
             return summary

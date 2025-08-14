@@ -21,3 +21,7 @@ pip install -r requirements.txt
 
 # Setup (see SETUP.md for detailed instructions)
 python main.py
+
+
+
+Apache 2.0

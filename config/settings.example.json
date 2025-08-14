@@ -1,0 +1,48 @@
+{
+    "gmail": {
+        "connected": false,
+        "email": "",
+        "credentials": null,
+        "email_filters": {
+            "sender_addresses": [
+                "notifications@cleverlogger.com"
+            ],
+            "subject_keywords": [
+                "min-max",
+                "temperature report"
+            ],
+            "exclude_keywords": [
+                "test",
+                "configuration"
+            ],
+            "require_pdf": true
+        }
+    },
+    "temperature": {
+        "type": "fridge",
+        "min_temp": 2,
+        "max_temp": 8,
+        "name": "Fridge Monitor"
+    },
+    "tts": {
+        "enabled": true,
+        "interval": "immediate",
+        "volume": "medium",
+        "quiet_hours_start": "22:00",
+        "quiet_hours_end": "07:00"
+    },
+    "web_server": {
+        "port": 8080,
+        "host": "localhost"
+    },
+    "scheduler": {
+        "announce_time": "09:00",
+        "enabled": false,
+        "search_hours_back": 24,
+        "auto_log_to_sheets": true,
+        "require_staff_confirmation": true
+    },
+    "sheets": {
+        "spreadsheet_id": null
+    }
+}

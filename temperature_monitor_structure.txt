@@ -1,0 +1,20 @@
+
+temperature_monitor/
+├── main.py                      # ✅ Main desktop application entry point
+├── requirements.txt             # ✅ Python dependencies
+├── services/                    # ✅ Background services directory
+│   ├── __init__.py              # ✅ Package initialization
+│   ├── auth_manager.py          # ✅ OAuth 2.0 Gmail authentication
+│   ├── gmail_service.py         # ✅ Email processing & PDF parsing (FIXED IMPORTS)
+│   ├── location_manager.py      # ✅ Intelligent location discovery
+│   └── sheets_service.py        # ✅ Google Sheets logging service
+├── web_interface/               # ✅ Flask web UI directory
+│   ├── __init__.py              # ✅ Package initialization
+│   ├── templates/               # 📁 HTML templates (optional - using inline templates)
+│   ├── static/                  # ✅ Static assets directory
+│   │   └── app.js               # ✅ ADDED - Separate JavaScript file (cleaner management)
+│   └── app.py                   # ✅ Flask routes & API endpoints (UPDATED - uses external JS)
+├── config/                      # ✅ Configuration management
+│   ├── settings.json            # ✅ User settings & preferences
+│   └── credentials.json         # ❌ MISSING - Need from Google Cloud Console
+└── test_pdf_parser.py           # ✅ Standalone PDF testing tool

@@ -11,6 +11,8 @@ A comprehensive temperature monitoring system with Gmail integration, voice anno
 - **Web Interface** - Complete setup wizard and configuration
 - **PDF Processing** - Smart parsing of Clever Logger temperature reports
 
+**License:** Apache 2.0 - Free for any use including commercial. Full license at apache.org/licenses/LICENSE-2.0
+
 ## 🚀 Quick Start
 
 ```bash
@@ -24,4 +26,4 @@ python main.py
 
 
 
-Apache 2.0
+

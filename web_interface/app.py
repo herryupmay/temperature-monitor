@@ -30,25 +30,37 @@ def create_app(desktop_app):
     app.desktop_app = desktop_app
     
     # Initialize Gmail services
-    app.auth_manager = GmailAuthManager(desktop_app.app_path)
-    app.gmail_service = GmailTemperatureService(app.auth_manager, desktop_app)
+    app.auth_manager = desktop_app.auth_manager
+    app.gmail_service = desktop_app.gmail_service
     # Initialize scheduler
     
     
-    spreadsheet_id = desktop_app.config.get("sheets", {}).get("spreadsheet_id")
-    app.sheets_service = TemperatureSheetsService(app.auth_manager, spreadsheet_id, desktop_app)
-    app.scheduler = TemperatureScheduler(desktop_app, app.gmail_service, app.sheets_service)
+    app.sheets_service = desktop_app.sheets_service
+
+    def get_scheduler():
+        """Get or create the scheduler instance - always use desktop app's instance"""
+        if not hasattr(desktop_app, 'scheduler') or not desktop_app.scheduler:
+            from services.temperature_scheduler import TemperatureScheduler
+            desktop_app.scheduler = TemperatureScheduler(desktop_app, app.gmail_service, app.sheets_service)
+        return desktop_app.scheduler
     
     # Set up announcement callback
     def announcement_callback(announcement_data):
         """Handle announcement results"""
-        formatted = app.scheduler.format_announcement_summary(announcement_data)
+        scheduler = get_scheduler()
+        formatted = scheduler.format_announcement_summary(announcement_data)
         desktop_app.add_log_message(f"📢 {formatted['title']}: {formatted['message']}")
         
         # Create custom TTS message
         if formatted['success'] and desktop_app.tts_engine:
             custom_message = create_natural_announcement(announcement_data, desktop_app.config)
             desktop_app.speak_alert(custom_message)
+
+    # Set callback on scheduler when it's accessed
+    def ensure_callback_set():
+        scheduler = get_scheduler()
+        scheduler.set_announcement_callback(announcement_callback)
+        return scheduler
 
     def create_natural_announcement(announcement_data, config):
         """Create natural language temperature announcement"""
@@ -125,21 +137,51 @@ def create_app(desktop_app):
         
         return " ".join(announcement_parts)
 
-    app.scheduler.set_announcement_callback(announcement_callback)
+    
 
     @app.route('/')
     def index():
         """Main setup wizard page"""
-        # Check real Gmail authentication status
-        real_gmail_connected = app.auth_manager.is_authenticated()
-        real_gmail_email = app.auth_manager.get_user_email() if real_gmail_connected else None
-        
-        # Create display config with real status
-        display_config = desktop_app.config.copy()
-        display_config['gmail']['connected'] = real_gmail_connected
-        display_config['gmail']['email'] = real_gmail_email or ''
-        
-        return render_template_string(SETUP_WIZARD_TEMPLATE, config=display_config)
+        try:
+            # Check real Gmail authentication status
+            real_gmail_connected = app.auth_manager.is_authenticated()
+            real_gmail_email = app.auth_manager.get_user_email() if real_gmail_connected else None
+            
+            # Debug logging
+            logger.info(f"Web interface debug - Real Gmail connected: {real_gmail_connected}")
+            logger.info(f"Web interface debug - Real Gmail email: {real_gmail_email}")
+            logger.info(f"Web interface debug - Config Gmail connected: {desktop_app.config.get('gmail', {}).get('connected', False)}")
+            
+            # Create display config with real status
+            display_config = desktop_app.config.copy()
+            
+            # Force update Gmail status with real-time data
+            if real_gmail_connected and real_gmail_email:
+                display_config['gmail'] = {
+                    'connected': True,
+                    'email': real_gmail_email
+                }
+                # Also update the desktop app config to keep them in sync
+                desktop_app.config['gmail']['connected'] = True
+                desktop_app.config['gmail']['email'] = real_gmail_email
+                desktop_app.save_config()
+                logger.info(f"Web interface - Forcing Gmail status to connected: {real_gmail_email}")
+            else:
+                display_config['gmail'] = {
+                    'connected': False,
+                    'email': ''
+                }
+                logger.info("Web interface - Gmail not connected")
+            
+            # Debug: Print what we're sending to template
+            logger.info(f"Web interface - Final config being sent to template: gmail_connected={display_config['gmail']['connected']}, email={display_config['gmail']['email']}")
+            
+            return render_template_string(SETUP_WIZARD_TEMPLATE, config=display_config)
+            
+        except Exception as e:
+            logger.error(f"Error in web interface index route: {e}")
+            # Fallback to basic config
+            return render_template_string(SETUP_WIZARD_TEMPLATE, config=desktop_app.config)
     
     @app.route('/api/gmail/connect', methods=['POST'])
     def connect_gmail():
@@ -404,12 +446,17 @@ def create_app(desktop_app):
     def get_scheduler_status():
         """Get current scheduler status"""
         try:
-            status = app.scheduler.get_scheduler_status()
+            scheduler = ensure_callback_set()  # ✅ Changed
+            status = scheduler.get_scheduler_status()
+            
+            logger.info(f"Scheduler status check: running={status.get('running')}, enabled={status.get('enabled')}")
+            
             return jsonify({
                 'success': True,
                 'status': status
             })
         except Exception as e:
+            logger.error(f"Error getting scheduler status: {e}")
             return jsonify({
                 'success': False,
                 'error': str(e)
@@ -419,7 +466,8 @@ def create_app(desktop_app):
     def get_scheduler_settings():
         """Get current scheduler settings"""
         try:
-            settings = app.scheduler.get_schedule_settings()
+            scheduler = get_scheduler()  # ✅ Changed
+            settings = scheduler.get_schedule_settings()
             return jsonify({
                 'success': True,
                 'settings': settings
@@ -448,7 +496,8 @@ def create_app(desktop_app):
                         'error': 'Invalid time format. Use HH:MM (24-hour format)'
                     }), 400
             
-            success, message = app.scheduler.update_schedule_settings(data)
+            scheduler = get_scheduler()  # ✅ Changed
+            success, message = scheduler.update_schedule_settings(data)
             
             return jsonify({
                 'success': success,
@@ -464,7 +513,8 @@ def create_app(desktop_app):
     def start_scheduler():
         """Start the temperature scheduler"""
         try:
-            success, message = app.scheduler.start_scheduler()
+            scheduler = ensure_callback_set()  # ✅ Changed
+            success, message = scheduler.start_scheduler()
             
             return jsonify({
                 'success': success,
@@ -480,7 +530,8 @@ def create_app(desktop_app):
     def stop_scheduler():
         """Stop the temperature scheduler"""
         try:
-            success, message = app.scheduler.stop_scheduler()
+            scheduler = get_scheduler()  # ✅ Changed
+            success, message = scheduler.stop_scheduler()
             
             return jsonify({
                 'success': success,
@@ -496,10 +547,11 @@ def create_app(desktop_app):
     def test_announcement():
         """Run a manual temperature announcement for testing"""
         try:
-            success, result = app.scheduler.run_manual_announcement()
+            scheduler = ensure_callback_set()  # ✅ Changed
+            success, result = scheduler.run_manual_announcement()
             
             if success:
-                formatted_result = app.scheduler.format_announcement_summary(result)
+                formatted_result = scheduler.format_announcement_summary(result)
                 return jsonify({
                     'success': True,
                     'announcement': formatted_result,
@@ -516,7 +568,7 @@ def create_app(desktop_app):
                 'success': False,
                 'error': str(e)
             }), 500
-
+        
     @app.route('/api/sheets/confirm', methods=['POST'])
     def add_staff_confirmation():
         """Add staff confirmation to sheets"""
@@ -574,7 +626,85 @@ def create_app(desktop_app):
                 'success': False,
                 'error': str(e)
             }), 500
-        
+
+
+    @app.route('/api/auto-startup/status', methods=['GET'])
+    def get_auto_startup_status():
+        """Get current auto-startup status"""
+        try:
+            status = desktop_app.get_auto_startup_status()
+            return jsonify({
+                'success': True,
+                'status': status
+            })
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
+    @app.route('/api/auto-startup/enable', methods=['POST'])
+    def enable_auto_startup():
+        """Enable Windows auto-startup"""
+        try:
+            success, message = desktop_app.enable_auto_startup()
+            
+            if success:
+                desktop_app.add_log_message(f"✅ Auto-startup enabled: {message}")
+            else:
+                desktop_app.add_log_message(f"❌ Auto-startup failed: {message}")
+            
+            return jsonify({
+                'success': success,
+                'message': message
+            })
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
+    @app.route('/api/auto-startup/disable', methods=['POST'])
+    def disable_auto_startup():
+        """Disable Windows auto-startup"""
+        try:
+            success, message = desktop_app.disable_auto_startup()
+            
+            if success:
+                desktop_app.add_log_message(f"✅ Auto-startup disabled: {message}")
+            else:
+                desktop_app.add_log_message(f"❌ Auto-startup disable failed: {message}")
+            
+            return jsonify({
+                'success': success,
+                'message': message
+            })
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
+    @app.route('/api/auto-startup/validate', methods=['POST'])
+    def validate_auto_startup():
+        """Validate auto-startup registry entry"""
+        try:
+            success, message = desktop_app.validate_startup_entry()
+            
+            if success:
+                desktop_app.add_log_message(f"✅ Auto-startup validation: {message}")
+            else:
+                desktop_app.add_log_message(f"⚠️ Auto-startup validation: {message}")
+            
+            return jsonify({
+                'success': success,
+                'message': message
+            })
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500    
         
     return app
 
@@ -1111,6 +1241,27 @@ SETUP_WIZARD_TEMPLATE = '''
                 <!-- Test Results -->
                 <div id="test-results" style="display: none; background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 15px;">
                     Test results will appear here...
+                </div>
+            </div>
+
+            <!-- Windows Auto-Startup Section -->
+            <div class="setup-section" id="auto-startup-section">
+                <div class="section-title"> Windows Auto-Startup</div>
+                <p>Start Temperature Monitor automatically when Windows boots.</p>
+                
+                <div style="display: flex; align-items: center; gap: 20px; margin: 20px 0;">
+                    <label style="display: flex; align-items: center; gap: 8px; font-weight: normal;">
+                        <input type="checkbox" id="auto-startup-enabled"> 
+                        Enable Auto-Startup with Windows
+                    </label>
+                    
+                    <span id="auto-startup-status" style="padding: 5px 10px; border-radius: 5px; font-size: 0.9rem;">
+                        Loading...
+                    </span>
+                </div>
+                
+                <div style="text-align: center;">
+                    <button class="btn btn-primary" onclick="toggleAutoStartup()">💾 Save Auto-Startup Setting</button>
                 </div>
             </div>
 

@@ -255,6 +255,7 @@ class TemperatureScheduler:
     def get_scheduler_status(self):
         """Get current status of the scheduler"""
         try:
+            logger.info(f"DEBUG: Checking scheduler status - self.is_running = {self.is_running}")
             settings = self.get_schedule_settings()
             next_run, next_message = self.get_next_announcement_time()
             

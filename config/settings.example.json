@@ -35,6 +35,11 @@
         "port": 8080,
         "host": "localhost"
     },
+    "auto_startup": {
+        "enabled": false,
+        "app_name": "Temperature Monitor",
+        "validated": false
+    },
     "scheduler": {
         "announce_time": "09:00",
         "enabled": true,

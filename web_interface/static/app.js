@@ -490,6 +490,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Load initial status and settings
     loadSchedulerStatus();
     loadSchedulerSettings();
+    loadAutoStartupStatus();
     
     // Refresh status every 30 seconds
     setInterval(loadSchedulerStatus, 30000);
@@ -545,8 +546,115 @@ function showError(message) {
     showAlert(message, 'error');
 }
 
+// Auto-Startup Functions
+async function loadAutoStartupStatus() {
+    try {
+        const response = await fetch('/api/auto-startup/status');
+        const data = await response.json();
+        
+        if (data.success) {
+            const status = data.status;
+            const checkbox = document.getElementById('auto-startup-enabled');
+            const statusSpan = document.getElementById('auto-startup-status');
+            
+            if (status.available) {
+                // Update checkbox
+                checkbox.checked = status.config_enabled;
+                checkbox.disabled = false;
+                
+                // Update status display
+                if (status.validated) {
+                    statusSpan.textContent = '✅ Enabled';
+                    statusSpan.style.background = '#d4edda';
+                    statusSpan.style.color = '#155724';
+                } else if (status.config_enabled) {
+                    statusSpan.textContent = '⚠️ Enabled but not validated';
+                    statusSpan.style.background = '#fff3cd';
+                    statusSpan.style.color = '#856404';
+                } else {
+                    statusSpan.textContent = '❌ Disabled';
+                    statusSpan.style.background = '#f8d7da';
+                    statusSpan.style.color = '#721c24';
+                }
+            } else {
+                // Not on Windows or winreg not available
+                checkbox.disabled = true;
+                statusSpan.textContent = '❌ Not available (Windows only)';
+                statusSpan.style.background = '#f8d7da';
+                statusSpan.style.color = '#721c24';
+            }
+        } else {
+            throw new Error(data.error || 'Failed to load auto-startup status');
+        }
+    } catch (error) {
+        console.error('Error loading auto-startup status:', error);
+        const statusSpan = document.getElementById('auto-startup-status');
+        statusSpan.textContent = '❌ Error loading status';
+        statusSpan.style.background = '#f8d7da';
+        statusSpan.style.color = '#721c24';
+    }
+}
+
+async function toggleAutoStartup() {
+    const checkbox = document.getElementById('auto-startup-enabled');
+    const statusSpan = document.getElementById('auto-startup-status');
+    
+    try {
+        statusSpan.textContent = '⏳ Updating...';
+        statusSpan.style.background = '#e2e3e5';
+        statusSpan.style.color = '#383d41';
+        
+        const endpoint = checkbox.checked ? '/api/auto-startup/enable' : '/api/auto-startup/disable';
+        const response = await fetch(endpoint, { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            showAlert(data.message);
+            
+            // Update status display
+            if (checkbox.checked) {
+                statusSpan.textContent = '✅ Enabled';
+                statusSpan.style.background = '#d4edda';
+                statusSpan.style.color = '#155724';
+            } else {
+                statusSpan.textContent = '❌ Disabled';
+                statusSpan.style.background = '#f8d7da';
+                statusSpan.style.color = '#721c24';
+            }
+        } else {
+            throw new Error(data.error || 'Failed to update auto-startup');
+        }
+    } catch (error) {
+        console.error('Error toggling auto-startup:', error);
+        showAlert('Error updating auto-startup: ' + error.message, 'error');
+        
+        // Revert checkbox state
+        checkbox.checked = !checkbox.checked;
+        statusSpan.textContent = '❌ Update failed';
+        statusSpan.style.background = '#f8d7da';
+        statusSpan.style.color = '#721c24';
+    }
+}
+
 // Initialize the interface
 document.addEventListener('DOMContentLoaded', function() {
+      fetch('/api/status')
+        .then(response => response.json())
+        .then(status => {
+            console.log('Current status:', status);
+            
+            // Update Gmail status in the UI if needed
+            if (status.gmail_connected && status.gmail_email) {
+                console.log('Gmail is connected, updating UI:', status.gmail_email);
+                updateGmailStatusUI(true, status.gmail_email);
+            } else {
+                console.log('Gmail not connected, updating UI');
+                updateGmailStatusUI(false, '');
+            }
+        })
+        .catch(error => {
+            console.log('Could not load status:', error);
+        });
     // Get config from server to set initial selection
     fetch('/api/config')
         .then(response => response.json())
@@ -561,3 +669,37 @@ document.addEventListener('DOMContentLoaded', function() {
             selectedTempType = 'fridge';
         });
 });
+
+function updateGmailStatusUI(connected, email) {
+    const gmailSection = document.getElementById('gmail-section');
+    if (!gmailSection) return;
+    
+    if (connected && email) {
+        gmailSection.innerHTML = `
+            <div class="status-connected">
+                <span class="status-indicator"></span>
+                <span>Gmail connected: ${email}</span>
+            </div>
+            <button class="btn btn-warning" onclick="testGmail()">Test Gmail Connection</button>
+            <button class="btn btn-danger" onclick="disconnectGmail()">Disconnect</button>
+        `;
+        // Show email filter section
+        const emailFilterSection = document.getElementById('email-filter-section');
+        if (emailFilterSection) {
+            emailFilterSection.style.display = 'block';
+        }
+    } else {
+        gmailSection.innerHTML = `
+            <div class="status-disconnected">
+                <span class="status-indicator"></span>
+                <span>Gmail not connected</span>
+            </div>
+            <button class="btn btn-primary" id="gmail-connect-btn" onclick="connectGmail()">Connect Gmail Account</button>
+        `;
+        // Hide email filter section
+        const emailFilterSection = document.getElementById('email-filter-section');
+        if (emailFilterSection) {
+            emailFilterSection.style.display = 'none';
+        }
+    }
+}

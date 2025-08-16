@@ -24,6 +24,65 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+import platform
+import subprocess
+
+if platform.system() == "Windows":
+    try:
+        import winreg
+    except ImportError:
+        winreg = None
+        logger.warning("winreg module not available - auto-startup will be disabled")
+
+class ConnectionMonitor:
+    """Monitor internet and Gmail connectivity with auto-recovery"""
+    
+    def __init__(self, desktop_app):
+        self.desktop_app = desktop_app
+        self.is_online = True
+        self.last_internet_check = None
+        self.last_gmail_check = None
+        self.retry_count = 0
+        self.max_retries = 5
+        
+        logger.info("ConnectionMonitor initialized")
+    
+    def check_internet_connectivity(self):
+        """Check if internet is available by testing Google"""
+        try:
+            import urllib.request
+            urllib.request.urlopen('https://www.google.com', timeout=5)
+            self.last_internet_check = datetime.now()
+            return True
+        except Exception as e:
+            logger.debug(f"Internet check failed: {e}")
+            return False
+    
+    def check_gmail_connectivity(self):
+        """Check if Gmail API is reachable and authenticated"""
+        try:
+            if hasattr(self.desktop_app, 'auth_manager') and self.desktop_app.auth_manager:
+                is_auth = self.desktop_app.auth_manager.is_authenticated()
+                self.last_gmail_check = datetime.now()
+                return is_auth
+            return False
+        except Exception as e:
+            logger.debug(f"Gmail check failed: {e}")
+            return False
+    
+    def get_connectivity_status(self):
+        """Get current connectivity status summary"""
+        internet_ok = self.check_internet_connectivity()
+        gmail_ok = self.check_gmail_connectivity() if internet_ok else False
+        
+        return {
+            'internet': internet_ok,
+            'gmail': gmail_ok,
+            'last_internet_check': self.last_internet_check,
+            'last_gmail_check': self.last_gmail_check,
+            'retry_count': self.retry_count
+        }
+
 class TemperatureMonitorApp:
     def __init__(self):
         self.monitoring_active = False
@@ -35,6 +94,7 @@ class TemperatureMonitorApp:
         self.alert_queue = queue.Queue()
         self.running = True
         self.web_server = None
+        self.connection_monitor = None 
         
         
         # Start background services
@@ -93,6 +153,18 @@ class TemperatureMonitorApp:
             "web_server": {
                 "port": 8080,
                 "host": "localhost"
+            },
+              "auto_startup": {
+                "enabled": True,
+                "app_name": "Temperature Monitor",
+                "validated": False
+            },
+            "scheduler": {
+                "announce_time": "09:00",
+                "enabled": True,
+                "search_hours_back": 24,
+                "auto_log_to_sheets": True,
+                "require_staff_confirmation": True
             }
         }
         
@@ -298,9 +370,8 @@ class TemperatureMonitorApp:
 
 
     def start_services(self):
-        """Start background services"""
-
-            # Initialize services
+        """Start background services with automatic Gmail connection"""
+        # Initialize services
         try:
             from services.auth_manager import GmailAuthManager
             from services.gmail_service import GmailTemperatureService
@@ -314,6 +385,11 @@ class TemperatureMonitorApp:
             logger.info("Services initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing services: {e}")
+            self.add_log_message(f"❌ Service initialization failed: {e}")
+            return
+        
+        # 🔥 AUTO-CONNECT TO GMAIL ON STARTUP
+        self.auto_connect_gmail()
         
         # Start web server
         web_thread = threading.Thread(target=self.start_web_server, daemon=True)
@@ -322,11 +398,218 @@ class TemperatureMonitorApp:
         # Start alert processor
         alert_thread = threading.Thread(target=self.process_alerts, daemon=True)
         alert_thread.start()
-        
-        # Start monitoring service (if configured)
-        if self.config["gmail"]["connected"]:
-            monitor_thread = threading.Thread(target=self.start_monitoring_service, daemon=True)
-            monitor_thread.start()
+        # Initialize and start connection monitoring
+        self.connection_monitor = ConnectionMonitor(self)
+        self.add_log_message("🔄 Connection monitoring started")
+        self.start_auto_recovery()
+        # 🔥 AUTO-START SCHEDULER IF CONFIGURED
+        self.auto_start_scheduler()
+
+    def auto_connect_gmail(self):
+        """Automatically connect to Gmail on startup if credentials exist"""
+        try:
+            self.add_log_message("🔄 Checking Gmail connection...")
+            
+            # Check if credentials file exists
+            valid, message = self.auth_manager.check_credentials_file()
+            if not valid:
+                logger.warning(f"No credentials file: {message}")
+                self.add_log_message("⚠️ Gmail credentials not found. Use web interface to connect.")
+                self.update_gmail_status("Not Connected - No Credentials")
+                self.root.after(100, self.update_status_display)
+                return False
+            
+            # Check if we already have a valid token
+            if self.auth_manager.is_authenticated():
+                logger.info("Using existing authentication")
+                self.add_log_message("✅ Gmail already authenticated")
+            else:
+                # Attempt authentication
+                logger.info("Attempting Gmail authentication...")
+                success, auth_message = self.auth_manager.authenticate()
+                
+                if not success:
+                    logger.error(f"Gmail authentication failed: {auth_message}")
+                    self.add_log_message(f"❌ Gmail authentication failed: {auth_message}")
+                    self.update_gmail_status("Authentication Failed")
+                    self.root.after(100, self.update_status_display)
+                    return False
+                
+                logger.info("Gmail authentication successful")
+                self.add_log_message("✅ Gmail authentication successful")
+            
+            # Test Gmail service connection
+            gmail_success, gmail_message = self.gmail_service.connect()
+            
+            if gmail_success:
+                user_email = self.auth_manager.get_user_email()
+                logger.info(f"Gmail service connected: {user_email}")
+                self.add_log_message(f"✅ Gmail connected: {user_email}")
+                
+                # Update configuration
+                self.config['gmail']['connected'] = True
+                self.config['gmail']['email'] = user_email or 'Connected'
+                self.save_config()
+                
+                # Update GUI status
+                self.root.after(0, self.update_status_display)
+                self.update_gmail_status(f"Connected: {user_email}")
+                self.root.after(100, self.update_status_display)
+                
+                # Test email search to verify everything works
+                self.test_gmail_connection()
+                
+                return True
+            else:
+                logger.error(f"Gmail service connection failed: {gmail_message}")
+                self.add_log_message(f"❌ Gmail service failed: {gmail_message}")
+                self.update_gmail_status("Service Connection Failed")
+                self.root.after(100, self.update_status_display)
+                return False
+                
+        except Exception as e:
+            error_msg = f"Error during auto-connect: {e}"
+            logger.error(error_msg)
+            self.add_log_message(f"❌ Auto-connect failed: {str(e)}")
+            self.update_gmail_status("Auto-Connect Failed")
+            self.root.after(100, self.update_status_display)
+            return False
+
+    def test_gmail_connection(self):
+        """Test Gmail connection and search capability"""
+        try:
+            logger.info("Testing Gmail email search...")
+            
+            # Quick test search (last 24 hours)
+            emails, message = self.gmail_service.search_temperature_emails(hours_back=24, max_results=5)
+            
+            if emails:
+                logger.info(f"✅ Gmail test successful: Found {len(emails)} temperature emails")
+                self.add_log_message(f"✅ Gmail test: Found {len(emails)} temperature emails")
+            else:
+                if "error" in message.lower() or "failed" in message.lower():
+                    logger.warning(f"⚠️ Gmail test warning: {message}")
+                    self.add_log_message(f"⚠️ Gmail test: {message}")
+                else:
+                    logger.info(f"✅ Gmail test: {message}")
+                    self.add_log_message(f"✅ Gmail test: {message}")
+            
+        except Exception as e:
+            logger.warning(f"Gmail test failed: {e}")
+            self.add_log_message(f"⚠️ Gmail test failed: {str(e)}")
+
+    def auto_start_scheduler(self):
+        """Automatically start scheduler if configured and Gmail is connected"""
+        try:
+            # Check if Gmail is connected
+            if not self.config.get('gmail', {}).get('connected', False):
+                logger.info("Scheduler not started - Gmail not connected")
+                return
+            
+            # Check if scheduler is enabled in config
+            scheduler_config = self.config.get('scheduler', {})
+            if not scheduler_config.get('enabled', False):
+                logger.info("Scheduler not started - disabled in settings")
+                self.add_log_message("ℹ️ Scheduler disabled in settings")
+                return
+            
+            # Import and start scheduler
+            logger.info("Auto-starting temperature scheduler...")
+            self.add_log_message("🔄 Starting scheduler...")
+            
+            # Give services a moment to fully initialize
+            def start_scheduler_delayed():
+                time.sleep(5)  # Wait 5 seconds for services to settle
+                try:
+                    from services.temperature_scheduler import TemperatureScheduler
+                    
+                    # Initialize scheduler if not already done by web interface
+                    if not hasattr(self, 'scheduler'):
+                        # ✅ FIX: Pass self as config_manager (it has config and save_config methods)
+                        self.scheduler = TemperatureScheduler(self, self.gmail_service, self.sheets_service)
+                        logger.info("✅ Scheduler instance created")
+                    else:
+                        logger.info("✅ Using existing scheduler instance")
+                    
+                    # ✅ FIX: Properly handle and log start_scheduler results
+                    success, message = self.scheduler.start_scheduler()
+                    
+                    if success:
+                        logger.info(f"✅ Scheduler started automatically: {message}")
+                        self.add_log_message(f"✅ Scheduler started: {message}")
+                        
+                        # Get next run time
+                        next_run, next_message = self.scheduler.get_next_announcement_time()
+                        if next_run:
+                            self.add_log_message(f"📅 {next_message}")
+                            logger.info(f"📅 {next_message}")
+                    else:
+                        logger.error(f"❌ Scheduler start failed: {message}")
+                        self.add_log_message(f"⚠️ Scheduler failed: {message}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error auto-starting scheduler: {e}")
+                    self.add_log_message(f"❌ Scheduler error: {str(e)}")
+            
+            # Start scheduler in background thread
+            scheduler_thread = threading.Thread(target=start_scheduler_delayed, daemon=True)
+            scheduler_thread.start()
+            
+        except Exception as e:
+            logger.error(f"Error in auto_start_scheduler: {e}")
+            self.add_log_message(f"❌ Auto-start scheduler failed: {str(e)}")
+
+    def update_gmail_status(self, status):
+        """Update Gmail status display safely"""
+        try:
+            def update_ui():
+                if hasattr(self, 'gmail_status_label'):
+                    if "Connected:" in status:
+                        self.gmail_status_label.config(text=status, foreground="green")
+                    elif "Not Connected" in status or "Failed" in status:
+                        self.gmail_status_label.config(text=status, foreground="red")
+                    else:
+                        self.gmail_status_label.config(text=status, foreground="orange")
+            
+            # Schedule UI update on main thread
+            if hasattr(self, 'root'):
+                self.root.after(0, update_ui)
+                
+        except Exception as e:
+            logger.error(f"Error updating Gmail status display: {e}")
+
+    def show_startup_summary(self):
+        """Show a summary of startup status after all services initialize"""
+        def show_summary():
+            time.sleep(5)  # Wait for all services to initialize
+            
+            gmail_connected = self.config.get('gmail', {}).get('connected', False)
+            scheduler_enabled = self.config.get('scheduler', {}).get('enabled', False)
+            
+            summary_parts = []
+            summary_parts.append("🚀 Temperature Monitor Ready!")
+            
+            if gmail_connected:
+                summary_parts.append("✅ Gmail connected and tested")
+            else:
+                summary_parts.append("⚠️ Gmail not connected - use web interface")
+            
+            if scheduler_enabled and gmail_connected:
+                summary_parts.append("✅ Scheduler running - daily announcements active")
+            elif scheduler_enabled:
+                summary_parts.append("⚠️ Scheduler enabled but Gmail needed")
+            else:
+                summary_parts.append("ℹ️ Scheduler disabled - enable in web interface")
+            
+            summary_parts.append("🌐 Web interface available at localhost:8080")
+            
+            summary_message = "\n".join(summary_parts)
+            logger.info(f"Startup Summary:\n{summary_message}")
+            self.add_log_message("📋 " + summary_parts[0])
+            
+        # Show summary in background
+        summary_thread = threading.Thread(target=show_summary, daemon=True)
+        summary_thread.start()
     
     def start_web_server(self):
         """Start the embedded Flask web server"""
@@ -468,12 +751,28 @@ class TemperatureMonitorApp:
             messagebox.showerror("Error", f"Could not open web interface: {e}")
     
     def update_status_display(self):
-        """Update the status display in GUI"""
-        # Gmail status
-        if self.config["gmail"]["connected"]:
-            self.gmail_status_label.config(text="Connected", foreground="green")
-        else:
-            self.gmail_status_label.config(text="Not Connected", foreground="red")
+        """Update the status display in GUI with detailed error information"""
+        # Gmail status - check both config and real authentication
+        try:
+            real_gmail_connected = self.auth_manager.is_authenticated() if hasattr(self, 'auth_manager') else False
+            config_gmail_connected = self.config["gmail"]["connected"]
+            
+            # Use real status if available, fall back to config
+            if real_gmail_connected:
+                user_email = self.auth_manager.get_user_email()
+                self.gmail_status_label.config(text=f"Connected: {user_email}", foreground="green")
+            elif config_gmail_connected:
+                # Config says connected but auth failed - show specific error
+                self.gmail_status_label.config(text="❌ Auth Failed - Click 'Connect Gmail' to fix", foreground="red")
+            else:
+                # Check if credentials file exists to give helpful error
+                creds_file = self.config_path / "credentials.json"
+                if not creds_file.exists():
+                    self.gmail_status_label.config(text="❌ Missing credentials.json file", foreground="red")
+                else:
+                    self.gmail_status_label.config(text="❌ Not Connected - Setup required", foreground="red")
+        except Exception as e:
+            self.gmail_status_label.config(text=f"❌ Error: {str(e)[:50]}...", foreground="red")
         
         # Temperature type
         temp_config = self.config["temperature"]
@@ -485,12 +784,114 @@ class TemperatureMonitorApp:
         else:
             temp_info = f"Custom ({temp_config['min_temp']}-{temp_config['max_temp']}°C)"
         
-        # Update monitoring status
-        if self.monitoring_active:
-            self.monitoring_status_label.config(text=f"Active - {temp_info}", foreground="green")
-        else:
-            self.monitoring_status_label.config(text="Inactive", foreground="red")
+        # Update monitoring status - consider monitoring active if Gmail connected and scheduler running
+        try:
+            # Check if scheduler is running using our method
+            scheduler_running = self.is_scheduler_running()
+            
+            # Monitoring is active if either manually toggled OR (Gmail connected AND scheduler running)
+            is_monitoring_active = self.monitoring_active or (real_gmail_connected and scheduler_running)
+            
+            if is_monitoring_active:
+                if scheduler_running:
+                    # Show next announcement time if available
+                    if hasattr(self, 'scheduler'):
+                        next_run, next_message = self.scheduler.get_next_announcement_time()
+                        if next_run:
+                            next_time = next_run.strftime('%H:%M')
+                            self.monitoring_status_label.config(text=f"✅ Active - {temp_info} (Next: {next_time})", foreground="green")
+                        else:
+                            self.monitoring_status_label.config(text=f"✅ Active - {temp_info} (Scheduled)", foreground="green")
+                    else:
+                        self.monitoring_status_label.config(text=f"✅ Active - {temp_info}", foreground="green")
+                else:
+                    self.monitoring_status_label.config(text=f"✅ Active - {temp_info}", foreground="green")
+            else:
+                if real_gmail_connected:
+                    if hasattr(self, 'scheduler'):
+                        scheduler_enabled = self.config.get('scheduler', {}).get('enabled', False)
+                        if scheduler_enabled and not scheduler_running:
+                            self.monitoring_status_label.config(text=f"❌ Scheduler stopped - {temp_info}", foreground="red")
+                        elif not scheduler_enabled:
+                            self.monitoring_status_label.config(text=f"⚠️ Ready - {temp_info} (Enable scheduler)", foreground="orange")
+                        else:
+                            self.monitoring_status_label.config(text=f"⚠️ Ready - {temp_info} (Start scheduler)", foreground="orange")
+                    else:
+                        self.monitoring_status_label.config(text=f"⚠️ Ready - {temp_info} (Start scheduler)", foreground="orange")
+                else:
+                    self.monitoring_status_label.config(text="❌ Inactive - Gmail connection required", foreground="red")
+        except Exception as e:
+            self.monitoring_status_label.config(text=f"❌ Status Error: {str(e)[:30]}...", foreground="red")
+        
+        # Temperature status - show last check time and data
+        try:
+            if hasattr(self, 'gmail_service') and real_gmail_connected:
+                # Try to get recent temperature summary to show last data time
+                import threading
+                def update_temp_status():
+                    try:
+                        summary = self.gmail_service.get_temperature_summary(hours_back=24, auto_log_to_sheets=False)
+                        if summary['total_readings'] > 0:
+                            latest = summary.get('latest_reading')
+                            if latest:
+                                last_temp = f"{latest['value']}°C at {latest['location']}"
+                                timestamp = latest['timestamp'].strftime('%H:%M')
+                                self.temp_status_label.config(text=f"🌡️ {last_temp} (Last: {timestamp})", foreground="green")
+                            else:
+                                self.temp_status_label.config(text=f"📊 {summary['total_readings']} readings found", foreground="green")
+                        else:
+                            self.temp_status_label.config(text="⚠️ No temperature data found (24h)", foreground="orange")
+                    except Exception as e:
+                        self.temp_status_label.config(text=f"❌ Data check failed: {str(e)[:30]}...", foreground="red")
+                
+                # Run temperature check in background to avoid blocking UI
+                temp_thread = threading.Thread(target=update_temp_status, daemon=True)
+                temp_thread.start()
+            else:
+                self.temp_status_label.config(text="❌ No data - Gmail required", foreground="red")
+        except Exception as e:
+            self.temp_status_label.config(text=f"❌ Error: {str(e)[:30]}...", foreground="red")
+        
+    def update_gmail_status(self, status):
+        """Update Gmail status display safely"""
+        try:
+            def update_ui():
+                if hasattr(self, 'gmail_status_label'):
+                    if "Connected:" in status:
+                        self.gmail_status_label.config(text=status, foreground="green")
+                    elif "Not Connected" in status or "Failed" in status or "Authentication Failed" in status:
+                        self.gmail_status_label.config(text=status, foreground="red")
+                    else:
+                        self.gmail_status_label.config(text=status, foreground="orange")
+            
+            # Schedule UI update on main thread
+            if hasattr(self, 'root'):
+                self.root.after(0, update_ui)
+                
+        except Exception as e:
+            logger.error(f"Error updating Gmail status display: {e}")
     
+    def is_scheduler_running(self):
+        """Check if the temperature scheduler is currently running"""
+        try:
+            if not hasattr(self, 'scheduler'):
+                return False
+            
+            # Check if scheduler exists and has is_running attribute
+            if hasattr(self.scheduler, 'is_running'):
+                return self.scheduler.is_running
+            
+            # Fallback: check if any scheduled jobs exist and scheduler thread is alive
+            import schedule
+            scheduled_jobs = len(schedule.get_jobs())
+            thread_alive = hasattr(self.scheduler, 'scheduler_thread') and self.scheduler.scheduler_thread and self.scheduler.scheduler_thread.is_alive()
+            
+            return scheduled_jobs > 0 and thread_alive
+            
+        except Exception as e:
+            logger.error(f"Error checking scheduler status: {e}")
+            return False
+
     def update_temp_status(self, status):
         """Update temperature status label"""
         self.temp_status_label.config(text=status)
@@ -538,6 +939,261 @@ class TemperatureMonitorApp:
         self.root.quit()
         sys.exit(0)
     
+    def start_auto_recovery(self):
+        """Start the auto-recovery background thread"""
+        try:
+            recovery_thread = threading.Thread(target=self.auto_recovery_loop, daemon=True)
+            recovery_thread.start()
+            self.add_log_message("🛡️ Auto-recovery monitoring started")
+            logger.info("Auto-recovery thread started")
+        except Exception as e:
+            logger.error(f"Error starting auto-recovery: {e}")
+
+    def auto_recovery_loop(self):
+        """Background thread for monitoring and auto-recovery"""
+        while self.running:
+            try:
+                # Check connectivity every 60 seconds
+                time.sleep(60)
+                
+                if not self.connection_monitor:
+                    continue
+                    
+                status = self.connection_monitor.get_connectivity_status()
+                
+                # Handle different connectivity scenarios
+                if not status['internet']:
+                    self.handle_internet_loss()
+                elif status['internet'] and not status['gmail']:
+                    self.handle_gmail_recovery()
+                elif status['internet'] and status['gmail']:
+                    self.handle_full_recovery()
+                    
+            except Exception as e:
+                logger.error(f"Auto-recovery loop error: {e}")
+                time.sleep(60)  # Continue even if there's an error
+
+    def handle_internet_loss(self):
+        """Handle internet connectivity loss"""
+        if self.connection_monitor.is_online:
+            self.connection_monitor.is_online = False
+            self.add_log_message("⚠️ Internet connection lost - monitoring paused")
+            self.update_gmail_status("🔴 Offline - Connection lost")
+            logger.warning("Internet connection lost")
+
+    def handle_gmail_recovery(self):
+        """Attempt to recover Gmail connection"""
+        try:
+            if self.connection_monitor.retry_count < self.connection_monitor.max_retries:
+                self.connection_monitor.retry_count += 1
+                self.add_log_message(f"🔄 Attempting Gmail recovery (attempt {self.connection_monitor.retry_count})")
+                
+                success, message = self.auth_manager.authenticate()
+                
+                if success:
+                    self.add_log_message("✅ Gmail connection recovered")
+                    self.connection_monitor.retry_count = 0
+                    
+                    # Restart scheduler if it's not running
+                    if not self.is_scheduler_running():
+                        self.auto_start_scheduler()
+                else:
+                    self.add_log_message(f"❌ Gmail recovery failed: {message}")
+                    
+        except Exception as e:
+            logger.error(f"Gmail recovery error: {e}")
+            self.add_log_message(f"❌ Recovery error: {str(e)}")
+
+    def handle_full_recovery(self):
+        """Handle full system recovery after connectivity restored"""
+        if not self.connection_monitor.is_online:
+            self.connection_monitor.is_online = True
+            self.connection_monitor.retry_count = 0
+            self.add_log_message("✅ Internet connection restored")
+            logger.info("Full connectivity recovered")
+            
+            # Update status display
+            self.root.after(0, self.update_status_display)
+            
+            # Restart scheduler if it's not running but should be
+            scheduler_enabled = self.config.get('scheduler', {}).get('enabled', False)
+            if scheduler_enabled and not self.is_scheduler_running():
+                self.add_log_message("🔄 Restarting scheduler after recovery")
+                self.auto_start_scheduler()
+
+    def check_auto_startup_status(self):
+        """Check if auto-startup is currently enabled in Windows registry"""
+        if platform.system() != "Windows" or not winreg:
+            return False, "Auto-startup only available on Windows"
+        
+        try:
+            app_name = self.config.get('auto_startup', {}).get('app_name', 'Temperature Monitor')
+            
+            # Open the Run registry key
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_READ
+            )
+            
+            try:
+                # Try to read our app's entry
+                value, reg_type = winreg.QueryValueEx(key, app_name)
+                winreg.CloseKey(key)
+                
+                # Check if the path matches our current executable
+                current_path = self.get_executable_path()
+                if value.strip('"') == current_path:
+                    return True, f"Auto-startup enabled: {app_name}"
+                else:
+                    return False, f"Auto-startup entry exists but path mismatch: {value}"
+                    
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return False, f"Auto-startup not enabled: {app_name} not found in registry"
+                
+        except Exception as e:
+            logger.error(f"Error checking auto-startup status: {e}")
+            return False, f"Error checking registry: {e}"
+
+    def enable_auto_startup(self):
+        """Enable auto-startup by adding Windows registry entry"""
+        if platform.system() != "Windows" or not winreg:
+            return False, "Auto-startup only available on Windows"
+        
+        try:
+            app_name = self.config.get('auto_startup', {}).get('app_name', 'Temperature Monitor')
+            executable_path = self.get_executable_path()
+            
+            logger.info(f"Adding auto-startup registry entry: {app_name} -> {executable_path}")
+            
+            # Open the Run registry key for writing
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_WRITE
+            )
+            
+            # Add our entry - wrap path in quotes to handle spaces
+            quoted_path = f'"{executable_path}"'
+            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, quoted_path)
+            winreg.CloseKey(key)
+            
+            # Update configuration
+            if 'auto_startup' not in self.config:
+                self.config['auto_startup'] = {}
+            self.config['auto_startup']['enabled'] = True
+            self.config['auto_startup']['validated'] = True
+            self.save_config()
+            
+            logger.info(f"Auto-startup enabled successfully: {app_name}")
+            return True, f"Auto-startup enabled: {app_name} will start with Windows"
+            
+        except Exception as e:
+            error_msg = f"Error enabling auto-startup: {e}"
+            logger.error(error_msg)
+            return False, error_msg
+
+    def disable_auto_startup(self):
+        """Disable auto-startup by removing Windows registry entry"""
+        if platform.system() != "Windows" or not winreg:
+            return False, "Auto-startup only available on Windows"
+        
+        try:
+            app_name = self.config.get('auto_startup', {}).get('app_name', 'Temperature Monitor')
+            
+            logger.info(f"Removing auto-startup registry entry: {app_name}")
+            
+            # Open the Run registry key for writing
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_WRITE
+            )
+            
+            try:
+                # Delete our entry
+                winreg.DeleteValue(key, app_name)
+                winreg.CloseKey(key)
+                
+                # Update configuration
+                if 'auto_startup' not in self.config:
+                    self.config['auto_startup'] = {}
+                self.config['auto_startup']['enabled'] = False
+                self.config['auto_startup']['validated'] = False
+                self.save_config()
+                
+                logger.info(f"Auto-startup disabled successfully: {app_name}")
+                return True, f"Auto-startup disabled: {app_name} will not start with Windows"
+                
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                # Entry doesn't exist, consider it success
+                return True, f"Auto-startup already disabled: {app_name} not found in registry"
+                
+        except Exception as e:
+            error_msg = f"Error disabling auto-startup: {e}"
+            logger.error(error_msg)
+            return False, error_msg
+
+    def validate_startup_entry(self):
+        """Validate that the auto-startup registry entry is correct"""
+        if platform.system() != "Windows" or not winreg:
+            return False, "Auto-startup validation only available on Windows"
+        
+        try:
+            enabled, message = self.check_auto_startup_status()
+            
+            if enabled:
+                # Update config to reflect validated status
+                if 'auto_startup' not in self.config:
+                    self.config['auto_startup'] = {}
+                self.config['auto_startup']['validated'] = True
+                self.save_config()
+                
+                return True, "Auto-startup validation successful"
+            else:
+                return False, f"Auto-startup validation failed: {message}"
+                
+        except Exception as e:
+            error_msg = f"Error validating auto-startup: {e}"
+            logger.error(error_msg)
+            return False, error_msg
+
+    def get_executable_path(self):
+        """Get the path to the current executable (works for both script and exe)"""
+        if getattr(sys, 'frozen', False):
+            # Running as compiled exe
+            return sys.executable
+        else:
+            # Running as script - return python + script path
+            script_path = str(Path(__file__).resolve())
+            python_path = sys.executable
+            return f'"{python_path}" "{script_path}"'
+
+    def get_auto_startup_status(self):
+        """Get complete auto-startup status for web interface"""
+        try:
+            config_enabled = self.config.get('auto_startup', {}).get('enabled', False)
+            registry_enabled, registry_message = self.check_auto_startup_status()
+            
+            return {
+                'available': platform.system() == "Windows" and winreg is not None,
+                'config_enabled': config_enabled,
+                'registry_enabled': registry_enabled,
+                'registry_message': registry_message,
+                'validated': config_enabled and registry_enabled,
+                'executable_path': self.get_executable_path()
+            }
+        except Exception as e:
+            return {
+                'available': False,
+                'error': str(e)
+            }
+
     def run(self):
         """Run the application"""
         logger.info("Starting Temperature Monitor Application")

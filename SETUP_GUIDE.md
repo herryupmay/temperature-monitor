@@ -30,12 +30,11 @@ Temperature Monitor automatically:
 
 ### 1.2 First Run Test
 1. **Double-click** `TemperatureMonitor.exe`
-2. You should see:
-   - System tray icon appears (blue thermometer)
-   - Desktop window opens
-   - Web browser opens to `http://localhost:8080`
+2. **Look for system tray icon** (blue thermometer in bottom-right corner)
+3. **Right-click the tray icon** → **Click "Show Window"** to open the desktop app
+4. **Manually open web browser** and go to: `http://localhost:8080`
 
-**✅ If this works, continue to Step 2!**
+**✅ If the system tray icon appears and the web interface loads, continue to Step 2!**
 
 ---
 
@@ -107,8 +106,9 @@ Temperature Monitor automatically:
 
 ### 3.1 Start the Application
 1. **Double-click** `TemperatureMonitor.exe`
-2. **Web browser** should open to `http://localhost:8080`
-3. **If browser doesn't open:** Manually go to `http://localhost:8080`
+2. **Look for system tray icon** (blue thermometer)
+3. **Open web browser** and go to: `http://localhost:8080`
+4. **Tip:** Right-click tray icon → "Open Web Interface" for quick access
 
 ### 3.2 Connect Gmail Account
 1. **In the web interface, find:** "Gmail Integration" section

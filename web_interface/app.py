@@ -93,30 +93,36 @@ def create_app(desktop_app):
             elif reading['type'] == 'maximum':
                 locations[location]['maxs'].append(reading['value'])
         
-        # Get temperature thresholds from config
-        temp_config = config.get('temperature', {})
-        temp_type = temp_config.get('type', 'fridge')
-        
-        # Set thresholds based on type
-        if temp_type == 'fridge':
-            min_threshold, max_threshold = 2.0, 8.0
-        elif temp_type == 'room':
-            min_threshold, max_threshold = 0.0, 25.0
-        else:  # custom
-            min_threshold = temp_config.get('min_temp', 2.0)
-            max_threshold = temp_config.get('max_temp', 8.0)
-        
         # Build announcement
         announcement_parts = [greeting + "."]
         
         breach_found = False
+        
+        # Get temperature config for per-location criteria
+        temp_config = config.get('temperature', {})
+        global_default = temp_config.get('global_default', {
+            'type': 'fridge', 'min_temp': 2.0, 'max_temp': 8.0
+        })
+        location_configs = temp_config.get('locations', {})
         
         for location, temps in locations.items():
             if temps['mins'] and temps['maxs']:
                 min_temp = min(temps['mins'])
                 max_temp = max(temps['maxs'])
                 
-                # Check for breaches
+                # Get thresholds for this specific location
+                location_config = location_configs.get(location, global_default)
+                location_type = location_config.get('type', 'fridge')
+                
+                if location_type == 'fridge':
+                    min_threshold, max_threshold = 2.0, 8.0
+                elif location_type == 'room':
+                    min_threshold, max_threshold = 0.0, 25.0
+                else:  # custom
+                    min_threshold = location_config.get('min_temp', 2.0)
+                    max_threshold = location_config.get('max_temp', 8.0)
+                
+                # Check for breaches using location-specific thresholds
                 location_breach = min_temp < min_threshold or max_temp > max_threshold
                 if location_breach:
                     breach_found = True
@@ -350,7 +356,7 @@ def create_app(desktop_app):
             'gmail_connected': gmail_connected,
             'gmail_email': user_email,
             'monitoring_active': desktop_app.monitoring_active,
-            'temperature_type': desktop_app.config['temperature']['type'],
+            'temperature_type': desktop_app.config['temperature'].get('global_default', {}).get('type', 'fridge'),
             'last_update': datetime.now().isoformat()
         })
     
@@ -705,6 +711,142 @@ def create_app(desktop_app):
                 'success': False,
                 'error': str(e)
             }), 500    
+        
+    @app.route('/api/locations/settings', methods=['GET'])
+    def get_location_settings():
+        """Get current per-location temperature settings"""
+        try:
+            temp_config = desktop_app.config.get('temperature', {})
+            
+            # Ensure we have the new structure
+            global_default = temp_config.get('global_default', {
+                'type': 'fridge',
+                'min_temp': 2.0,
+                'max_temp': 8.0,
+                'name': 'Default Monitor'
+            })
+            
+            locations = temp_config.get('locations', {})
+            
+            return jsonify({
+                'success': True,
+                'global_default': global_default,
+                'locations': locations,
+                'total_locations': len(locations)
+            })
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
+    @app.route('/api/locations/settings', methods=['POST'])
+    def save_location_settings():
+        """Save per-location temperature settings"""
+        try:
+            data = request.get_json()
+            
+            if not data:
+                return jsonify({
+                    'success': False,
+                    'error': 'No data provided'
+                }), 400
+            
+            global_default = data.get('global_default', {})
+            locations = data.get('locations', {})
+            
+            # Validate the data
+            required_fields = ['type', 'min_temp', 'max_temp']
+            
+            # Validate global default
+            for field in required_fields:
+                if field not in global_default:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Missing required field in global_default: {field}'
+                    }), 400
+            
+            # Validate each location
+            for location_name, location_config in locations.items():
+                for field in required_fields:
+                    if field not in location_config:
+                        return jsonify({
+                            'success': False,
+                            'error': f'Missing required field in {location_name}: {field}'
+                        }), 400
+            
+            # Update configuration
+            if 'temperature' not in desktop_app.config:
+                desktop_app.config['temperature'] = {}
+            
+            desktop_app.config['temperature']['global_default'] = global_default
+            desktop_app.config['temperature']['locations'] = locations
+            
+            # Save configuration
+            desktop_app.save_config()
+            
+            desktop_app.add_log_message(f"✅ Updated temperature settings for {len(locations)} locations")
+            
+            return jsonify({
+                'success': True,
+                'message': f'Saved settings for {len(locations)} locations',
+                'locations_updated': list(locations.keys())
+            })
+            
+        except Exception as e:
+            logger.error(f"Error saving location settings: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
+    @app.route('/api/locations/discover', methods=['POST'])
+    def discover_locations():
+        """Discover new locations from recent emails"""
+        try:
+            if not app.auth_manager.is_authenticated():
+                return jsonify({
+                    'success': False,
+                    'error': 'Gmail not connected. Please connect first.'
+                }), 400
+            
+            desktop_app.add_log_message("🔍 Discovering locations from recent emails...")
+            
+            # Get recent temperature data to discover locations
+            summary = app.gmail_service.get_temperature_summary(
+                hours_back=168, auto_log_to_sheets=False  # Last week
+            )
+            
+            if summary.get('total_readings', 0) == 0:
+                return jsonify({
+                    'success': False,
+                    'error': 'No temperature data found in recent emails'
+                })
+            
+            # Use the sheets service discovery method
+            app.sheets_service.discover_and_configure_locations(summary.get('all_readings', []))
+            
+            # Get updated location list
+            temp_config = desktop_app.config.get('temperature', {})
+            locations = temp_config.get('locations', {})
+            location_names = list(locations.keys())
+            
+            desktop_app.add_log_message(f"🔍 Discovered {len(location_names)} locations: {', '.join(location_names)}")
+            
+            return jsonify({
+                'success': True,
+                'message': f'Discovered {len(location_names)} locations',
+                'locations_found': len(location_names),
+                'location_names': location_names,
+                'locations': locations
+            })
+            
+        except Exception as e:
+            logger.error(f"Error discovering locations: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
         
     return app
 
@@ -1124,55 +1266,48 @@ SETUP_WIZARD_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- Temperature Alert Options -->
+            <!-- Per-Location Temperature Settings -->
             <div class="setup-section">
-                <div class="section-title">Temperature Alert Settings</div>
-                <p>Choose your monitoring type and alert thresholds.</p>
+                <div class="section-title">📍 Temperature Settings by Location</div>
+                <p>Configure temperature monitoring criteria for each discovered location.</p>
                 
-                <div class="temp-options">
-                    <!-- Fridge Option -->
-                    <div class="temp-option {% if config.temperature.type == 'fridge' %}selected{% endif %}" onclick="selectOption('fridge')">
-                        <input type="radio" name="temp-type" value="fridge" id="fridge-option" {% if config.temperature.type == 'fridge' %}checked{% endif %}>
-                        <div class="option-header">
-                            <div class="option-title">Fridge Temperature</div>
+                <!-- Global Default Settings -->
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 15px; color: #333;">🌐 Default Settings for New Locations</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px;">
+                        <div class="input-group">
+                            <label>Default Type</label>
+                            <select id="global-default-type">
+                                <option value="fridge" {% if config.temperature.global_default.type == 'fridge' %}selected{% endif %}>Fridge (2-8°C)</option>
+                                <option value="room" {% if config.temperature.global_default.type == 'room' %}selected{% endif %}>Room (0-25°C)</option>
+                                <option value="custom" {% if config.temperature.global_default.type == 'custom' %}selected{% endif %}>Custom Range</option>
+                            </select>
                         </div>
-                        <div class="option-description">Monitor refrigerator temperature for medicine safety</div>
-                        <div class="temp-range">Alert when outside: 2°C - 8°C</div>
-                    </div>
-
-                    <!-- Room Option -->
-                    <div class="temp-option {% if config.temperature.type == 'room' %}selected{% endif %}" onclick="selectOption('room')">
-                        <input type="radio" name="temp-type" value="room" id="room-option" {% if config.temperature.type == 'room' %}checked{% endif %}>
-                        <div class="option-header">
-                            <div class="option-title">Room Temperature</div>
+                        <div class="input-group">
+                            <label>Min Temp (°C)</label>
+                            <input type="number" id="global-default-min" step="0.1" value="{{ config.temperature.global_default.min_temp }}">
                         </div>
-                        <div class="option-description">Monitor room temperature for medicine storage</div>
-                        <div class="temp-range">Alert when above: 25°C</div>
-                    </div>
-
-                    <!-- Custom Option -->
-                    <div class="temp-option {% if config.temperature.type == 'custom' %}selected{% endif %}" onclick="selectOption('custom')">
-                        <input type="radio" name="temp-type" value="custom" id="custom-option" {% if config.temperature.type == 'custom' %}checked{% endif %}>
-                        <div class="option-header">
-                            <div class="option-title">Custom Range</div>
-                        </div>
-                        <div class="option-description">Set your own temperature thresholds</div>
-                        
-                        <div class="custom-inputs {% if config.temperature.type == 'custom' %}active{% endif %}" id="custom-inputs">
-                            <div class="input-group">
-                                <label for="min-temp">Minimum Temperature (°C)</label>
-                                <input type="number" id="min-temp" placeholder="e.g., 18" step="0.1" value="{{ config.temperature.min_temp }}">
-                            </div>
-                            <div class="input-group">
-                                <label for="max-temp">Maximum Temperature (°C)</label>
-                                <input type="number" id="max-temp" placeholder="e.g., 22" step="0.1" value="{{ config.temperature.max_temp }}">
-                            </div>
-                            <div class="input-group">
-                                <label for="custom-name">Alert Name</label>
-                                <input type="text" id="custom-name" placeholder="e.g., Wine Cellar" value="{{ config.temperature.name }}">
-                            </div>
+                        <div class="input-group">
+                            <label>Max Temp (°C)</label>
+                            <input type="number" id="global-default-max" step="0.1" value="{{ config.temperature.global_default.max_temp }}">
                         </div>
                     </div>
+                </div>
+                
+                <!-- Location-Specific Settings -->
+                <div id="location-settings">
+                    <h4 style="margin-bottom: 15px; color: #333;">📍 Individual Location Settings</h4>
+                    <div id="location-list">
+                        <!-- Will be populated by JavaScript -->
+                        <div style="text-align: center; color: #666; padding: 20px;">
+                            Loading location settings...
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="text-align: center; margin-top: 20px;">
+                    <button class="btn btn-primary" onclick="saveLocationSettings()">💾 Save Location Settings</button>
+                    <button class="btn btn-success" onclick="refreshLocations()" style="margin-left: 10px;">🔄 Refresh Locations</button>
                 </div>
             </div>
 

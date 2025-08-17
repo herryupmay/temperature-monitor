@@ -703,3 +703,172 @@ function updateGmailStatusUI(connected, email) {
         }
     }
 }
+
+// ===== PER-LOCATION TEMPERATURE SETTINGS =====
+
+function loadLocationSettings() {
+    fetch('/api/locations/settings')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                displayLocationSettings(data.locations, data.global_default);
+            } else {
+                showAlert('error', 'Failed to load location settings: ' + data.error);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading location settings:', error);
+            showAlert('error', 'Failed to load location settings');
+        });
+}
+
+function displayLocationSettings(locations, globalDefault) {
+    const locationList = document.getElementById('location-list');
+    
+    if (Object.keys(locations).length === 0) {
+        locationList.innerHTML = `
+            <div style="text-align: center; color: #666; padding: 20px;">
+                <p>🔍 No locations discovered yet.</p>
+                <p>Run a temperature check to auto-discover locations from your emails.</p>
+                <button class="btn btn-primary" onclick="testAnnouncement()">🧪 Discover Locations</button>
+            </div>
+        `;
+        return;
+    }
+    
+    let html = '';
+    
+    for (const [locationName, config] of Object.entries(locations)) {
+        html += `
+            <div class="location-config" style="border: 2px solid #e9ecef; border-radius: 12px; padding: 20px; margin-bottom: 15px;">
+                <h5 style="margin-bottom: 15px; color: #333;">📍 ${locationName}</h5>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 15px; align-items: end;">
+                    <div class="input-group">
+                        <label>Monitor Type</label>
+                        <select class="location-type" data-location="${locationName}">
+                            <option value="fridge" ${config.type === 'fridge' ? 'selected' : ''}>Fridge (2-8°C)</option>
+                            <option value="room" ${config.type === 'room' ? 'selected' : ''}>Room (0-25°C)</option>
+                            <option value="custom" ${config.type === 'custom' ? 'selected' : ''}>Custom Range</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label>Min Temp (°C)</label>
+                        <input type="number" step="0.1" class="location-min" data-location="${locationName}" value="${config.min_temp}">
+                    </div>
+                    <div class="input-group">
+                        <label>Max Temp (°C)</label>
+                        <input type="number" step="0.1" class="location-max" data-location="${locationName}" value="${config.max_temp}">
+                    </div>
+                    <div>
+                        <button class="btn btn-warning" onclick="resetLocationToDefault('${locationName}')" style="padding: 8px 12px;">🔄 Reset</button>
+                    </div>
+                </div>
+                <div style="margin-top: 10px;">
+                    <small style="color: #666;">Current: ${config.name || locationName}</small>
+                </div>
+            </div>
+        `;
+    }
+    
+    locationList.innerHTML = html;
+    
+    // Add event listeners for automatic preset updates
+    document.querySelectorAll('.location-type').forEach(select => {
+        select.addEventListener('change', function() {
+            updateLocationPresets(this.dataset.location, this.value);
+        });
+    });
+}
+
+function updateLocationPresets(locationName, type) {
+    const minInput = document.querySelector(`.location-min[data-location="${locationName}"]`);
+    const maxInput = document.querySelector(`.location-max[data-location="${locationName}"]`);
+    
+    if (type === 'fridge') {
+        minInput.value = 2.0;
+        maxInput.value = 8.0;
+    } else if (type === 'room') {
+        minInput.value = 0.0;
+        maxInput.value = 25.0;
+    }
+    // For 'custom', leave values as user set them
+}
+
+function resetLocationToDefault(locationName) {
+    const globalDefaultType = document.getElementById('global-default-type').value;
+    const typeSelect = document.querySelector(`.location-type[data-location="${locationName}"]`);
+    
+    typeSelect.value = globalDefaultType;
+    updateLocationPresets(locationName, globalDefaultType);
+}
+
+function saveLocationSettings() {
+    // Collect global default settings
+    const globalDefault = {
+        type: document.getElementById('global-default-type').value,
+        min_temp: parseFloat(document.getElementById('global-default-min').value),
+        max_temp: parseFloat(document.getElementById('global-default-max').value),
+        name: 'Default Monitor'
+    };
+    
+    // Collect location-specific settings
+    const locations = {};
+    
+    document.querySelectorAll('.location-type').forEach(select => {
+        const locationName = select.dataset.location;
+        const minInput = document.querySelector(`.location-min[data-location="${locationName}"]`);
+        const maxInput = document.querySelector(`.location-max[data-location="${locationName}"]`);
+        
+        locations[locationName] = {
+            type: select.value,
+            min_temp: parseFloat(minInput.value),
+            max_temp: parseFloat(maxInput.value),
+            name: `${locationName} Monitor`
+        };
+    });
+    
+    // Send to server
+    fetch('/api/locations/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            global_default: globalDefault,
+            locations: locations
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert('success', 'Location settings saved successfully!');
+        } else {
+            showAlert('error', 'Failed to save settings: ' + data.error);
+        }
+    })
+    .catch(error => {
+        showAlert('error', 'Error saving settings: ' + error);
+    });
+}
+
+function refreshLocations() {
+    showAlert('info', 'Discovering locations from recent emails...');
+    
+    fetch('/api/locations/discover', {method: 'POST'})
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showAlert('success', `Discovered ${data.locations_found} locations: ${data.location_names.join(', ')}`);
+                loadLocationSettings(); // Reload the settings display
+            } else {
+                showAlert('error', 'Failed to discover locations: ' + data.error);
+            }
+        })
+        .catch(error => {
+            showAlert('error', 'Error discovering locations: ' + error);
+        });
+}
+
+// Load location settings when page loads
+document.addEventListener('DOMContentLoaded', function() {
+    // Add to existing DOMContentLoaded if it exists, or create new one
+    loadLocationSettings();
+});

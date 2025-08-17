@@ -46,6 +46,163 @@ class TemperatureSheetsService:
             logger.error(error_msg)
             return False, error_msg
     
+    def validate_existing_spreadsheet(self):
+        """Check if the current spreadsheet_id is valid and accessible"""
+        try:
+            if not self.spreadsheet_id:
+                logger.info("No spreadsheet ID configured")
+                return False, "No spreadsheet ID in settings"
+            
+            if not self.sheets_service:
+                success, message = self.connect()
+                if not success:
+                    return False, f"Cannot connect to Google Sheets: {message}"
+            
+            # Try to access the spreadsheet metadata
+            logger.info(f"Validating existing spreadsheet: {self.spreadsheet_id}")
+            spreadsheet = self.sheets_service.spreadsheets().get(
+                spreadsheetId=self.spreadsheet_id
+            ).execute()
+            
+            title = spreadsheet.get('properties', {}).get('title', 'Unknown')
+            sheet_count = len(spreadsheet.get('sheets', []))
+            
+            logger.info(f"✅ Found existing spreadsheet: '{title}' with {sheet_count} sheets")
+            return True, f"Valid spreadsheet: {title}"
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'not found' in error_msg or 'does not exist' in error_msg:
+                logger.warning(f"Spreadsheet {self.spreadsheet_id} not found or deleted")
+                return False, "Spreadsheet not found - may have been deleted"
+            elif 'permission' in error_msg or 'access' in error_msg:
+                logger.warning(f"No access to spreadsheet {self.spreadsheet_id}")
+                return False, "No permission to access spreadsheet"
+            else:
+                logger.error(f"Error validating spreadsheet {self.spreadsheet_id}: {e}")
+                return False, f"Validation error: {e}"
+
+    def ensure_spreadsheet_exists(self, auto_discover_locations=True):
+        """Ensure we have a valid spreadsheet - use existing or create new"""
+        try:
+            # First, try to validate existing spreadsheet
+            if self.spreadsheet_id:
+                valid, validation_message = self.validate_existing_spreadsheet()
+                if valid:
+                    logger.info(f"Using existing spreadsheet: {validation_message}")
+                    return True, f"Using existing spreadsheet: {validation_message}"
+                else:
+                    logger.warning(f"Existing spreadsheet invalid: {validation_message}")
+            
+            # No valid spreadsheet - need to create one
+            logger.info("Creating new spreadsheet...")
+            
+            # Auto-discover locations if possible
+            locations = ["Main Location"]  # Default fallback
+            
+            if auto_discover_locations and hasattr(self, 'config_manager') and self.config_manager:
+                try:
+                    # Try to get recent emails to discover locations using the app's gmail service
+                    if hasattr(self.config_manager, 'gmail_service') and self.config_manager.gmail_service:
+                        logger.info("Attempting to auto-discover locations from recent emails...")
+                        # Get temperature summary to discover locations
+                        summary = self.config_manager.gmail_service.get_temperature_summary(
+                            hours_back=168, auto_log_to_sheets=False  # Last week
+                        )
+                        
+                        if summary.get('locations_found'):
+                            locations = list(summary['locations_found'].keys())
+                            logger.info(f"Auto-discovered locations: {locations}")
+                        else:
+                            logger.info("No locations discovered, using default")
+                            
+                except Exception as e:
+                    logger.warning(f"Could not auto-discover locations: {e}")
+            
+            # Create new spreadsheet
+            spreadsheet, create_message = self.create_temperature_spreadsheet(
+                locations, "Temperature Monitor - Pharmacy"
+            )
+            
+            if spreadsheet:
+                logger.info(f"✅ New spreadsheet created: {self.spreadsheet_id}")
+                return True, f"Created new spreadsheet with {len(locations)} locations"
+            else:
+                return False, f"Failed to create spreadsheet: {create_message}"
+                
+        except Exception as e:
+            error_msg = f"Error ensuring spreadsheet exists: {e}"
+            logger.error(error_msg)
+            return False, error_msg
+
+    def discover_and_configure_locations(self, temperature_readings):
+        """Discover new locations from readings and create configs with smart defaults"""
+        try:
+            if not hasattr(self, 'config_manager') or not self.config_manager:
+                return
+            
+            # Get current config
+            temp_config = self.config_manager.config.get('temperature', {})
+            global_default = temp_config.get('global_default', {
+                'type': 'fridge', 'min_temp': 2.0, 'max_temp': 8.0, 'name': 'Default Monitor'
+            })
+            location_configs = temp_config.get('locations', {})
+            
+            # Track if we need to save config
+            config_updated = False
+            
+            # Extract unique locations from readings
+            discovered_locations = set()
+            for reading in temperature_readings:
+                location = reading.get('location', '').strip()
+                if location:
+                    discovered_locations.add(location)
+            
+            # Create configs for new locations with smart defaults
+            for location in discovered_locations:
+                if location not in location_configs:
+                    # Smart default assignment based on location name
+                    location_lower = location.lower()
+                    
+                    if any(keyword in location_lower for keyword in ['fridge', 'freezer', 'vaccine', 'insulin', 'cold']):
+                        # Looks like a fridge/cold storage
+                        new_config = {
+                            'type': 'fridge',
+                            'min_temp': 2.0,
+                            'max_temp': 8.0,
+                            'name': f'{location} (Fridge Monitor)'
+                        }
+                    elif any(keyword in location_lower for keyword in ['room', 'dispensary', 'storage', 'office', 'counter']):
+                        # Looks like room temperature
+                        new_config = {
+                            'type': 'room', 
+                            'min_temp': 0.0,
+                            'max_temp': 25.0,
+                            'name': f'{location} (Room Monitor)'
+                        }
+                    else:
+                        # Unknown - use global default but let user know
+                        new_config = global_default.copy()
+                        new_config['name'] = f'{location} (Auto-detected)'
+                    
+                    # Add to config
+                    location_configs[location] = new_config
+                    config_updated = True
+                    
+                    logger.info(f"🔍 Auto-configured new location '{location}' as {new_config['type']} ({new_config['min_temp']}-{new_config['max_temp']}°C)")
+            
+            # Save updated config if we added any locations
+            if config_updated:
+                if 'temperature' not in self.config_manager.config:
+                    self.config_manager.config['temperature'] = {}
+                self.config_manager.config['temperature']['locations'] = location_configs
+                self.config_manager.save_config()
+                
+                logger.info(f"✅ Updated config with {len([l for l in discovered_locations if l not in temp_config.get('locations', {})])} new locations")
+        
+        except Exception as e:
+            logger.error(f"Error discovering and configuring locations: {e}")
+
     def create_temperature_spreadsheet(self, locations, title="Pharmacy Temperature Monitor"):
         """Create a new spreadsheet with separate tabs for each location"""
         try:
@@ -256,9 +413,14 @@ class TemperatureSheetsService:
                 if not success:
                     return False, message
             
-            if not self.spreadsheet_id:
-                return False, "No spreadsheet configured. Create a spreadsheet first."
+           
+            spreadsheet_ready, spreadsheet_message = self.ensure_spreadsheet_exists()
+            if not spreadsheet_ready:
+                return False, f"Cannot prepare spreadsheet: {spreadsheet_message}"
             
+            logger.info(f"Using spreadsheet for logging: {self.spreadsheet_id}")
+
+            self.discover_and_configure_locations(temperature_readings)
             # Use custom logged time if provided, otherwise current time
             if custom_logged_time:
                 logged_time = custom_logged_time.strftime("%H:%M")

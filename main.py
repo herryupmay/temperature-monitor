@@ -135,10 +135,17 @@ class TemperatureMonitorApp:
                 }
             },
             "temperature": {
-                "type": "fridge",  # fridge, room, custom
-                "min_temp": 2,
-                "max_temp": 8,
-                "name": "Fridge Monitor"
+                "global_default": {
+                    "type": "fridge",
+                    "min_temp": 2,
+                    "max_temp": 8,
+                    "name": "Default Monitor"
+                },
+                "locations": {
+                    # This starts empty and gets populated automatically
+                    # as locations are discovered from emails
+                    # e.g. "Main Fridge": {"type": "fridge", "min_temp": 2, "max_temp": 8}
+                }
             },
             "tts": {
                 "enabled": True,
@@ -406,44 +413,91 @@ class TemperatureMonitorApp:
         self.auto_start_scheduler()
 
     def auto_connect_gmail(self):
-        """Automatically connect to Gmail on startup if credentials exist"""
+        """Automatically connect to Gmail on startup - RESILIENT VERSION that never crashes"""
         try:
+            logger.info("🔄 Starting resilient Gmail auto-connect...")
             self.add_log_message("🔄 Checking Gmail connection...")
             
-            # Check if credentials file exists
+            # Use our safe connection method with timeout
+            success, message = self.safe_gmail_connect(timeout_seconds=30)
+            
+            if success:
+                logger.info(f"✅ Gmail auto-connect successful: {message}")
+                self.add_log_message(f"✅ Gmail auto-connected: {message}")
+                
+                # Update GUI status on main thread
+                self.root.after(0, self.update_status_display)
+                
+                # Test email search to verify everything works
+                try:
+                    self.test_gmail_connection()
+                except Exception as e:
+                    # Don't crash if test fails - just log it
+                    logger.warning(f"Gmail test failed but connection succeeded: {e}")
+                    self.add_log_message(f"⚠️ Gmail connected but test failed: {str(e)}")
+                
+                return True
+            else:
+                logger.warning(f"Gmail auto-connect failed: {message}")
+                self.add_log_message(f"⚠️ Gmail auto-connect failed: {message}")
+                self.add_log_message("ℹ️ Use web interface to connect Gmail manually")
+                
+                # Update GUI to show disconnected status
+                self.update_gmail_status(f"Auto-connect failed: {message}")
+                self.root.after(100, self.update_status_display)
+                
+                return False
+                
+        except Exception as e:
+            # NEVER crash the app - just log the error
+            error_msg = f"Gmail auto-connect error: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            self.add_log_message(f"❌ {error_msg}")
+            self.add_log_message("ℹ️ App continues running - use web interface to connect Gmail")
+            
+            # Update GUI to show error status
+            self.update_gmail_status("Auto-connect error - Use web interface")
+            self.root.after(100, self.update_status_display)
+            
+            return False
+        
+    def safe_gmail_connect(self, timeout_seconds=30):
+        """Safely attempt Gmail connection with timeout and error handling"""
+        try:
+            logger.info("🔄 Attempting safe Gmail connection...")
+            self.add_log_message("🔄 Connecting to Gmail...")
+            
+            # Check if credentials file exists first
+            if not hasattr(self, 'auth_manager') or not self.auth_manager:
+                logger.warning("Auth manager not available")
+                return False, "Authentication manager not initialized"
+            
             valid, message = self.auth_manager.check_credentials_file()
             if not valid:
-                logger.warning(f"No credentials file: {message}")
-                self.add_log_message("⚠️ Gmail credentials not found. Use web interface to connect.")
-                self.update_gmail_status("Not Connected - No Credentials")
-                self.root.after(100, self.update_status_display)
-                return False
+                logger.warning(f"Credentials file issue: {message}")
+                self.add_log_message("⚠️ Gmail credentials not found - use web interface to connect")
+                return False, f"Credentials not available: {message}"
             
-            # Check if we already have a valid token
+            # Check if already authenticated
             if self.auth_manager.is_authenticated():
-                logger.info("Using existing authentication")
-                self.add_log_message("✅ Gmail already authenticated")
-            else:
-                # Attempt authentication
-                logger.info("Attempting Gmail authentication...")
-                success, auth_message = self.auth_manager.authenticate()
-                
-                if not success:
-                    logger.error(f"Gmail authentication failed: {auth_message}")
-                    self.add_log_message(f"❌ Gmail authentication failed: {auth_message}")
-                    self.update_gmail_status("Authentication Failed")
-                    self.root.after(100, self.update_status_display)
-                    return False
-                
-                logger.info("Gmail authentication successful")
-                self.add_log_message("✅ Gmail authentication successful")
+                logger.info("✅ Gmail already authenticated")
+                self.add_log_message("✅ Gmail already connected")
+                return True, "Already authenticated"
             
-            # Test Gmail service connection
+            # Attempt authentication
+            success, auth_message = self.auth_manager.authenticate()
+            
+            if not success:
+                logger.warning(f"Gmail authentication failed: {auth_message}")
+                self.add_log_message(f"⚠️ Gmail authentication failed: {auth_message}")
+                return False, auth_message
+            
+            # Test Gmail service
             gmail_success, gmail_message = self.gmail_service.connect()
             
             if gmail_success:
                 user_email = self.auth_manager.get_user_email()
-                logger.info(f"Gmail service connected: {user_email}")
+                logger.info(f"✅ Gmail connected successfully: {user_email}")
                 self.add_log_message(f"✅ Gmail connected: {user_email}")
                 
                 # Update configuration
@@ -451,29 +505,15 @@ class TemperatureMonitorApp:
                 self.config['gmail']['email'] = user_email or 'Connected'
                 self.save_config()
                 
-                # Update GUI status
-                self.root.after(0, self.update_status_display)
-                self.update_gmail_status(f"Connected: {user_email}")
-                self.root.after(100, self.update_status_display)
-                
-                # Test email search to verify everything works
-                self.test_gmail_connection()
-                
-                return True
+                return True, f"Connected: {user_email}"
             else:
-                logger.error(f"Gmail service connection failed: {gmail_message}")
-                self.add_log_message(f"❌ Gmail service failed: {gmail_message}")
-                self.update_gmail_status("Service Connection Failed")
-                self.root.after(100, self.update_status_display)
-                return False
+                logger.warning(f"Gmail service failed: {gmail_message}")
+                return False, gmail_message
                 
         except Exception as e:
-            error_msg = f"Error during auto-connect: {e}"
-            logger.error(error_msg)
-            self.add_log_message(f"❌ Auto-connect failed: {str(e)}")
-            self.update_gmail_status("Auto-Connect Failed")
-            self.root.after(100, self.update_status_display)
-            return False
+            logger.error(f"Exception during Gmail connection: {e}")
+            self.add_log_message(f"⚠️ Gmail connection error: {str(e)}")
+            return False, f"Connection error: {e}"
 
     def test_gmail_connection(self):
         """Test Gmail connection and search capability"""
@@ -499,11 +539,18 @@ class TemperatureMonitorApp:
             self.add_log_message(f"⚠️ Gmail test failed: {str(e)}")
 
     def auto_start_scheduler(self):
-        """Automatically start scheduler if configured and Gmail is connected"""
+        """Automatically start scheduler if configured and Gmail is connected - with resilient error handling"""
         try:
-            # Check if Gmail is connected
-            if not self.config.get('gmail', {}).get('connected', False):
-                logger.info("Scheduler not started - Gmail not connected")
+            # ✅ FIX: Check REAL auth status, not config value
+            if not hasattr(self, 'auth_manager') or not self.auth_manager:
+                logger.info("Scheduler not started - auth manager not available")
+                self.add_log_message("⚠️ Scheduler not started - auth manager not ready")
+                return
+            
+            # Check if Gmail is actually authenticated (not just config setting)
+            if not self.auth_manager.is_authenticated():
+                logger.info("Scheduler not started - Gmail not authenticated")
+                self.add_log_message("ℹ️ Scheduler not started - Gmail authentication required")
                 return
             
             # Check if scheduler is enabled in config
@@ -513,29 +560,32 @@ class TemperatureMonitorApp:
                 self.add_log_message("ℹ️ Scheduler disabled in settings")
                 return
             
-            # Import and start scheduler
-            logger.info("Auto-starting temperature scheduler...")
-            self.add_log_message("🔄 Starting scheduler...")
+            # ✅ NEW: Add retry logic for scheduler startup
+            max_retries = 3
+            retry_delay = 5
             
-            # Give services a moment to fully initialize
-            def start_scheduler_delayed():
-                time.sleep(5)  # Wait 5 seconds for services to settle
+            for attempt in range(max_retries):
                 try:
+                    logger.info(f"Attempting to start scheduler (attempt {attempt + 1}/{max_retries})...")
+                    self.add_log_message(f"🔄 Starting scheduler (attempt {attempt + 1}/{max_retries})...")
+                    
+                    # Give services time to initialize if this is first attempt
+                    if attempt == 0:
+                        time.sleep(3)
+                    
+                    # Import and start scheduler
                     from services.temperature_scheduler import TemperatureScheduler
                     
-                    # Initialize scheduler if not already done by web interface
-                    if not hasattr(self, 'scheduler'):
-                        # ✅ FIX: Pass self as config_manager (it has config and save_config methods)
+                    # Initialize scheduler if not already done
+                    if not hasattr(self, 'scheduler') or not self.scheduler:
                         self.scheduler = TemperatureScheduler(self, self.gmail_service, self.sheets_service)
                         logger.info("✅ Scheduler instance created")
-                    else:
-                        logger.info("✅ Using existing scheduler instance")
                     
-                    # ✅ FIX: Properly handle and log start_scheduler results
+                    # ✅ FIX: Properly handle start_scheduler results
                     success, message = self.scheduler.start_scheduler()
                     
                     if success:
-                        logger.info(f"✅ Scheduler started automatically: {message}")
+                        logger.info(f"✅ Scheduler started successfully: {message}")
                         self.add_log_message(f"✅ Scheduler started: {message}")
                         
                         # Get next run time
@@ -543,21 +593,46 @@ class TemperatureMonitorApp:
                         if next_run:
                             self.add_log_message(f"📅 {next_message}")
                             logger.info(f"📅 {next_message}")
-                    else:
-                        logger.error(f"❌ Scheduler start failed: {message}")
-                        self.add_log_message(f"⚠️ Scheduler failed: {message}")
                         
+                        # Success - break out of retry loop
+                        return
+                    else:
+                        logger.warning(f"⚠️ Scheduler start attempt {attempt + 1} failed: {message}")
+                        self.add_log_message(f"⚠️ Scheduler attempt {attempt + 1} failed: {message}")
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"Retrying scheduler start in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                        else:
+                            # Final attempt failed
+                            logger.error(f"❌ Scheduler failed to start after {max_retries} attempts")
+                            self.add_log_message(f"❌ Scheduler failed after {max_retries} attempts - will retry automatically")
+                            
                 except Exception as e:
-                    logger.error(f"❌ Error auto-starting scheduler: {e}")
-                    self.add_log_message(f"❌ Scheduler error: {str(e)}")
+                    logger.error(f"❌ Scheduler start attempt {attempt + 1} exception: {e}")
+                    self.add_log_message(f"❌ Scheduler attempt {attempt + 1} error: {str(e)}")
+                    
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying scheduler start in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                    else:
+                        # Final attempt failed
+                        logger.error(f"❌ Scheduler startup failed after {max_retries} attempts with exceptions")
+                        self.add_log_message("❌ Scheduler startup failed - will retry in background")
             
-            # Start scheduler in background thread
-            scheduler_thread = threading.Thread(target=start_scheduler_delayed, daemon=True)
-            scheduler_thread.start()
+            # Schedule a delayed retry in the background if all attempts failed
+            def delayed_retry():
+                time.sleep(60)  # Wait 1 minute
+                logger.info("🔄 Attempting delayed scheduler retry...")
+                self.add_log_message("🔄 Retrying scheduler startup...")
+                self.auto_start_scheduler()
             
+            retry_thread = threading.Thread(target=delayed_retry, daemon=True)
+            retry_thread.start()
+                            
         except Exception as e:
-            logger.error(f"Error in auto_start_scheduler: {e}")
-            self.add_log_message(f"❌ Auto-start scheduler failed: {str(e)}")
+            logger.error(f"Critical error in auto_start_scheduler: {e}")
+            self.add_log_message(f"❌ Scheduler startup error: {str(e)}")
 
     def update_gmail_status(self, status):
         """Update Gmail status display safely"""
@@ -774,16 +849,17 @@ class TemperatureMonitorApp:
         except Exception as e:
             self.gmail_status_label.config(text=f"❌ Error: {str(e)[:50]}...", foreground="red")
         
-        # Temperature type
+       
+        # Temperature type - use global default
         temp_config = self.config["temperature"]
-        temp_type = temp_config["type"]
+        global_default = temp_config.get("global_default", {"type": "fridge", "min_temp": 2, "max_temp": 8})
+        temp_type = global_default["type"]
         if temp_type == "fridge":
             temp_info = "Fridge (2-8°C)"
         elif temp_type == "room":
             temp_info = "Room (>25°C)"
         else:
-            temp_info = f"Custom ({temp_config['min_temp']}-{temp_config['max_temp']}°C)"
-        
+            temp_info = f"Custom ({global_default['min_temp']}-{global_default['max_temp']}°C)"
         # Update monitoring status - consider monitoring active if Gmail connected and scheduler running
         try:
             # Check if scheduler is running using our method

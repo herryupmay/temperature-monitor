@@ -47,14 +47,22 @@ def create_app(desktop_app):
     # Set up announcement callback
     def announcement_callback(announcement_data):
         """Handle announcement results"""
+        print("🔍 DEBUG: announcement_callback called")  # DEBUG
         scheduler = get_scheduler()
         formatted = scheduler.format_announcement_summary(announcement_data)
+        print(f"🔍 DEBUG: formatted success = {formatted.get('success')}")  # DEBUG
         desktop_app.add_log_message(f"📢 {formatted['title']}: {formatted['message']}")
         
         # Create custom TTS message
-        if formatted['success'] and desktop_app.tts_engine:
+        if formatted['success']:
+            print("🔍 DEBUG: Creating custom message...")  # DEBUG
             custom_message = create_natural_announcement(announcement_data, desktop_app.config)
+            print(f"🔍 DEBUG: Custom message = {custom_message[:50]}...")  # DEBUG
+            print("🔍 DEBUG: Calling speak_alert...")  # DEBUG
             desktop_app.speak_alert(custom_message)
+            print("🔍 DEBUG: speak_alert call completed")  # DEBUG
+        else:
+            print("🔍 DEBUG: Skipping voice - formatted success is False")  # DEBUG
 
     # Set callback on scheduler when it's accessed
     def ensure_callback_set():

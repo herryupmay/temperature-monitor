@@ -785,13 +785,31 @@ class TemperatureMonitorApp:
     
     def speak_alert(self, message):
         """Speak an alert message using TTS"""
-        if self.tts_engine:
-            try:
-                self.tts_engine.say(message)
-                self.tts_engine.runAndWait()
-            except Exception as e:
-                logger.error(f"Error with TTS: {e}")
-    
+        try:
+            # Use Windows SAPI directly instead of pyttsx3
+            import subprocess
+            import platform
+            
+            if platform.system() == "Windows":
+                # Escape single quotes in the message to prevent PowerShell errors
+                escaped_message = message.replace("'", "''")
+                # Use Windows built-in speech with female voice
+                command = f'''powershell -Command "
+                    Add-Type -AssemblyName System.Speech;
+                    $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer;
+                    $femaleVoice = $synth.GetInstalledVoices() | Where-Object {{$_.VoiceInfo.Gender -eq 'Female'}} | Select-Object -First 1;
+                    if ($femaleVoice) {{ $synth.SelectVoice($femaleVoice.VoiceInfo.Name) }};
+                    $synth.Speak('{escaped_message}')
+                "'''
+                subprocess.run(command, shell=True, capture_output=True)
+                logger.info("Voice alert delivered via Windows SAPI (female voice)")
+            else:
+                logger.warning("Voice alerts only supported on Windows")
+                
+    except Exception as e:
+        logger.error(f"Error with TTS: {e}")
+        self.add_log_message(f"Voice alert failed: {str(e)}")
+            
     def test_voice_alert(self):
         """Test voice alert functionality"""
         test_message = "This is a test temperature alert. The system is working correctly."
